@@ -11,3 +11,5 @@ Release/
 .settings/
 RemoteSystemsTempFiles/
 .vscode/
+
+app/
