@@ -23,7 +23,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "app_log.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -44,7 +44,8 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-static uint8_t boot_message[] = "stm32-env-monitor boot\r\n";
+static HAL_StatusTypeDef boot_log_status;
+static uint32_t last_heartbeat_tick;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -89,7 +90,8 @@ int main(void)
   MX_GPIO_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-  HAL_UART_Transmit(&huart1, boot_message, sizeof(boot_message) - 1U, 100U);
+  boot_log_status = app_log_write(&huart1,
+                                "stm32-env-monitor boot\r\n");
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -97,9 +99,26 @@ int main(void)
   while (1)
   {
     /* USER CODE END WHILE */
-    HAL_GPIO_TogglePin(LED_PC13_GPIO_Port, LED_PC13_Pin);
-    HAL_Delay(500U);
+
     /* USER CODE BEGIN 3 */
+    uint32_t current_tick = HAL_GetTick();
+    uint32_t heartbeat_period = (boot_log_status == HAL_OK) ? 500U : 100U;
+
+    if ((current_tick - last_heartbeat_tick) >= heartbeat_period)
+    {
+        last_heartbeat_tick = current_tick;
+
+        if (boot_log_status == HAL_OK)
+        {
+            HAL_GPIO_TogglePin(LED_PC13_GPIO_Port, LED_PC13_Pin);
+        }
+        else
+        {
+            HAL_GPIO_WritePin(LED_PC13_GPIO_Port,
+                              LED_PC13_Pin,
+                              GPIO_PIN_RESET);
+        }
+    }
   }
   /* USER CODE END 3 */
 }
