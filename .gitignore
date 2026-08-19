@@ -1,0 +1,13 @@
+﻿Debug/
+Release/
+*.elf
+*.hex
+*.bin
+*.map
+*.list
+*.d
+*.su
+*.o
+.settings/
+RemoteSystemsTempFiles/
+.vscode/
