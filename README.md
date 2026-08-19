@@ -1,6 +1,6 @@
 # stm32-env-monitor
 
-基于 STM32 的嵌入式环境监测联网终端，用于嵌入式软件实习项目经历。
+基于 STM32 的嵌入式环境监测联网终端。
 
 目标硬件：STM32F103C8T6 Blue Pill、AHT20、BH1750、SSD1306 OLED，以及负责 Wi-Fi/MQTT 的 ESP32 DevKit V1。
 
@@ -40,4 +40,3 @@ python tools/protocol_selftest.py
 - `docs/02-roadmap.md`
 - `docs/03-software-architecture.md`
 - `docs/04-freertos-task-contract.md`
-
