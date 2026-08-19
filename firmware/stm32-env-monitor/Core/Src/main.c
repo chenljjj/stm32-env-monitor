@@ -44,7 +44,7 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-
+static uint8_t boot_message[] = "stm32-env-monitor boot\r\n";
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -89,7 +89,7 @@ int main(void)
   MX_GPIO_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-
+  HAL_UART_Transmit(&huart1, boot_message, sizeof(boot_message) - 1U, 100U);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -97,7 +97,8 @@ int main(void)
   while (1)
   {
     /* USER CODE END WHILE */
-
+    HAL_GPIO_TogglePin(LED_PC13_GPIO_Port, LED_PC13_Pin);
+    HAL_Delay(500U);
     /* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */
