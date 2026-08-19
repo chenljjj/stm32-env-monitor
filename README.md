@@ -17,26 +17,11 @@ FreeRTOS、传感器、OLED 和 ESP32 联调在这个基线通过后逐步加入
 
 ## 目录说明
 
-CubeIDE 工程生成后，`Core`、`Drivers` 和工程元数据应直接位于本目录并纳入 Git。当前可移植的软件层位于 `app`，后续可以复制到生成工程的 `Core/Inc` 和 `Core/Src`。
+CubeMX 生成的 STM32CubeIDE 工程位于 `firmware/stm32-env-monitor`，其中包含 `Core`、`Drivers`、`.ioc` 和链接脚本，均应纳入 Git。
 
-- `app/include`：与硬件无关的头文件
-- `app/src`：数据校验、UART 协议、MQTT JSON 和故障统计实现
-- `docs`：CubeIDE 配置、架构和实现路线
-- `tools`：不依赖开发板的主机侧检查脚本
-
-## 硬件到货前的检查
-
-在项目根目录运行：
-
-```powershell
-python tools/protocol_selftest.py
-```
-
-该检查不需要 STM32 工具链或开发板，用于验证 STM32 与 ESP32 之间共用的 UART 帧格式、CRC 参数和字段偏移。
+- `docs`：项目配置和开发过程文档
 
 更多内容见：
 
 - `docs/01-cubeide-bringup.md`
 - `docs/02-roadmap.md`
-- `docs/03-software-architecture.md`
-- `docs/04-freertos-task-contract.md`
