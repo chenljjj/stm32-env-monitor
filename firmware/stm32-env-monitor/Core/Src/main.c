@@ -18,12 +18,16 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "i2c.h"
 #include "usart.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "app_log.h"
+#include "app_display.h"
+#include "app_monitor.h"
+#include "app_status.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -44,8 +48,12 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-static HAL_StatusTypeDef boot_log_status;
-static uint32_t last_heartbeat_tick;
+/* 集中保存启动结果与 LED 心跳状态。 */
+static app_status_t app_status;
+/* 保存最新传感器快照及各设备的错误统计。 */
+static app_monitor_t app_monitor;
+/* OLED 页面状态与 128x64 显示缓存。 */
+static app_display_t app_display;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -67,6 +75,7 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
+  uint8_t sample_updated;
 
   /* USER CODE END 1 */
 
@@ -89,9 +98,13 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART1_UART_Init();
+  MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
-  boot_log_status = app_log_write(&huart1,
-                                "stm32-env-monitor boot\r\n");
+  /* 日志失败仅改变状态指示，不阻止主程序继续运行。 */
+  app_status_init(&app_status,
+                  app_log_write(&huart1, "stm32-env-monitor boot\r\n"));
+  app_monitor_init(&app_monitor);
+  app_display_init(&app_display);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -101,24 +114,42 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    uint32_t current_tick = HAL_GetTick();
-    uint32_t heartbeat_period = (boot_log_status == HAL_OK) ? 500U : 100U;
+    /* 非阻塞地更新 LED 心跳与故障指示。 */
+    app_status_update(&app_status, LED_PC13_GPIO_Port, LED_PC13_Pin);
 
-    if ((current_tick - last_heartbeat_tick) >= heartbeat_period)
+    sample_updated = app_monitor_update(&app_monitor, &hi2c1);
+    if (sample_updated != 0U)
     {
-        last_heartbeat_tick = current_tick;
+      int32_t temperature_fraction = app_monitor.climate.temperature_milli_c % 1000;
 
-        if (boot_log_status == HAL_OK)
-        {
-            HAL_GPIO_TogglePin(LED_PC13_GPIO_Port, LED_PC13_Pin);
-        }
-        else
-        {
-            HAL_GPIO_WritePin(LED_PC13_GPIO_Port,
-                              LED_PC13_Pin,
-                              GPIO_PIN_RESET);
-        }
+      if (temperature_fraction < 0)
+      {
+        temperature_fraction = -temperature_fraction;
+      }
+
+      /* 同时输出有效标志和错误次数，便于未接硬件时定位问题。 */
+      (void)app_log_printf(&huart1,
+                           "sample=%lu aht=%d valid=%u t=%ld.%03ldC h=%lu.%03lu%% "
+                           "bh=%d valid=%u l=%lu.%03lulx err=%lu/%lu\r\n",
+                           (unsigned long)app_monitor.sample_sequence,
+                           (int)app_monitor.aht20_status,
+                           (unsigned int)app_monitor.climate_valid,
+                           (long)(app_monitor.climate.temperature_milli_c / 1000),
+                           (long)temperature_fraction,
+                           (unsigned long)(app_monitor.climate.humidity_milli_rh / 1000U),
+                           (unsigned long)(app_monitor.climate.humidity_milli_rh % 1000U),
+                           (int)app_monitor.bh1750_status,
+                           (unsigned int)app_monitor.illuminance_valid,
+                           (unsigned long)(app_monitor.illuminance_milli_lux / 1000U),
+                           (unsigned long)(app_monitor.illuminance_milli_lux % 1000U),
+                           (unsigned long)app_monitor.aht20_error_count,
+                           (unsigned long)app_monitor.bh1750_error_count);
     }
+
+    app_display_update(&app_display,
+                       &hi2c1,
+                       &app_monitor,
+                       sample_updated);
   }
   /* USER CODE END 3 */
 }

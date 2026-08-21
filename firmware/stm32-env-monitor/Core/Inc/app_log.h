@@ -5,5 +5,8 @@
 
 HAL_StatusTypeDef app_log_write(UART_HandleTypeDef *huart,
                                 const char *message);
+HAL_StatusTypeDef app_log_printf(UART_HandleTypeDef *huart,
+                                 const char *format,
+                                 ...);
 
 #endif
