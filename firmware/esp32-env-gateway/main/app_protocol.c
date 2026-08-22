@@ -1,0 +1,224 @@
+#include "app_protocol.h"
+
+#include <string.h>
+
+static void app_protocol_put_u16_le(uint8_t *buffer, uint16_t value)
+{
+    buffer[0] = (uint8_t)(value & 0xFFU);
+    buffer[1] = (uint8_t)(value >> 8U);
+}
+
+static uint16_t app_protocol_get_u16_le(const uint8_t *buffer)
+{
+    return (uint16_t)buffer[0] | ((uint16_t)buffer[1] << 8U);
+}
+
+static uint32_t app_protocol_get_u32_le(const uint8_t *buffer)
+{
+    return (uint32_t)buffer[0] |
+           ((uint32_t)buffer[1] << 8U) |
+           ((uint32_t)buffer[2] << 16U) |
+           ((uint32_t)buffer[3] << 24U);
+}
+
+uint16_t app_protocol_crc16_ccitt(const uint8_t *data, size_t length)
+{
+    uint16_t crc = 0xFFFFU;
+
+    if ((data == NULL) && (length != 0U))
+    {
+        return 0U;
+    }
+
+    for (size_t index = 0U; index < length; index++)
+    {
+        crc ^= (uint16_t)data[index] << 8U;
+        for (uint8_t bit = 0U; bit < 8U; bit++)
+        {
+            crc = ((crc & 0x8000U) != 0U) ?
+                      (uint16_t)((crc << 1U) ^ 0x1021U) :
+                      (uint16_t)(crc << 1U);
+        }
+    }
+
+    return crc;
+}
+
+bool app_protocol_encode(uint8_t type,
+                         uint16_t sequence,
+                         const uint8_t *payload,
+                         uint16_t payload_length,
+                         uint8_t *frame,
+                         size_t frame_capacity,
+                         uint16_t *frame_length)
+{
+    uint16_t body_length;
+    uint16_t required_length;
+    uint16_t crc;
+
+    if ((frame == NULL) || (frame_length == NULL) ||
+        ((payload == NULL) && (payload_length != 0U)) ||
+        (payload_length > APP_PROTOCOL_MAX_PAYLOAD_LENGTH))
+    {
+        return false;
+    }
+
+    body_length = APP_PROTOCOL_BODY_HEADER_LENGTH + payload_length;
+    required_length = 2U + body_length + APP_PROTOCOL_CRC_LENGTH;
+    if (frame_capacity < required_length)
+    {
+        return false;
+    }
+
+    frame[0] = APP_PROTOCOL_SOF0;
+    frame[1] = APP_PROTOCOL_SOF1;
+    frame[2] = APP_PROTOCOL_VERSION;
+    frame[3] = type;
+    app_protocol_put_u16_le(&frame[4], sequence);
+    app_protocol_put_u16_le(&frame[6], payload_length);
+    if (payload_length != 0U)
+    {
+        (void)memcpy(&frame[8], payload, payload_length);
+    }
+
+    crc = app_protocol_crc16_ccitt(&frame[2], body_length);
+    app_protocol_put_u16_le(&frame[2U + body_length], crc);
+    *frame_length = required_length;
+
+    return true;
+}
+
+void app_protocol_parser_init(app_protocol_parser_t *parser)
+{
+    if (parser != NULL)
+    {
+        parser->state = APP_PROTOCOL_RX_WAIT_SOF0;
+        parser->body_length = 0U;
+        parser->payload_length = 0U;
+        parser->crc_low = 0U;
+    }
+}
+
+app_protocol_parse_result_t app_protocol_parser_input(app_protocol_parser_t *parser,
+                                                       uint8_t byte,
+                                                       app_protocol_frame_t *frame)
+{
+    uint16_t received_crc;
+    uint16_t calculated_crc;
+
+    if ((parser == NULL) || (frame == NULL))
+    {
+        return APP_PROTOCOL_PARSE_NONE;
+    }
+
+    switch (parser->state)
+    {
+        case APP_PROTOCOL_RX_WAIT_SOF0:
+            if (byte == APP_PROTOCOL_SOF0)
+            {
+                parser->state = APP_PROTOCOL_RX_WAIT_SOF1;
+            }
+            break;
+
+        case APP_PROTOCOL_RX_WAIT_SOF1:
+            if (byte == APP_PROTOCOL_SOF1)
+            {
+                parser->state = APP_PROTOCOL_RX_READ_BODY;
+                parser->body_length = 0U;
+            }
+            else if (byte != APP_PROTOCOL_SOF0)
+            {
+                parser->state = APP_PROTOCOL_RX_WAIT_SOF0;
+            }
+            break;
+
+        case APP_PROTOCOL_RX_READ_BODY:
+            parser->body[parser->body_length++] = byte;
+            if (parser->body_length == APP_PROTOCOL_BODY_HEADER_LENGTH)
+            {
+                if (parser->body[0] != APP_PROTOCOL_VERSION)
+                {
+                    app_protocol_parser_init(parser);
+                    return APP_PROTOCOL_PARSE_VERSION_ERROR;
+                }
+
+                parser->payload_length = app_protocol_get_u16_le(&parser->body[4]);
+                if (parser->payload_length > APP_PROTOCOL_MAX_PAYLOAD_LENGTH)
+                {
+                    app_protocol_parser_init(parser);
+                    return APP_PROTOCOL_PARSE_LENGTH_ERROR;
+                }
+                if (parser->payload_length == 0U)
+                {
+                    parser->state = APP_PROTOCOL_RX_READ_CRC_LOW;
+                }
+            }
+            else if (parser->body_length ==
+                     (APP_PROTOCOL_BODY_HEADER_LENGTH + parser->payload_length))
+            {
+                parser->state = APP_PROTOCOL_RX_READ_CRC_LOW;
+            }
+            break;
+
+        case APP_PROTOCOL_RX_READ_CRC_LOW:
+            parser->crc_low = byte;
+            parser->state = APP_PROTOCOL_RX_READ_CRC_HIGH;
+            break;
+
+        case APP_PROTOCOL_RX_READ_CRC_HIGH:
+            received_crc = (uint16_t)parser->crc_low | ((uint16_t)byte << 8U);
+            calculated_crc = app_protocol_crc16_ccitt(parser->body, parser->body_length);
+            if (received_crc != calculated_crc)
+            {
+                app_protocol_parser_init(parser);
+                return APP_PROTOCOL_PARSE_CRC_ERROR;
+            }
+
+            frame->type = parser->body[1];
+            frame->sequence = app_protocol_get_u16_le(&parser->body[2]);
+            frame->payload_length = parser->payload_length;
+            if (parser->payload_length != 0U)
+            {
+                (void)memcpy(frame->payload,
+                             &parser->body[APP_PROTOCOL_BODY_HEADER_LENGTH],
+                             parser->payload_length);
+            }
+            app_protocol_parser_init(parser);
+            return APP_PROTOCOL_PARSE_FRAME;
+
+        default:
+            app_protocol_parser_init(parser);
+            break;
+    }
+
+    return APP_PROTOCOL_PARSE_NONE;
+}
+
+bool app_protocol_unpack_env_report(const app_protocol_frame_t *frame,
+                                    app_protocol_env_report_t *report)
+{
+    const uint8_t *payload;
+
+    if ((frame == NULL) || (report == NULL) ||
+        (frame->type != APP_PROTOCOL_TYPE_ENV_REPORT) ||
+        (frame->payload_length != APP_PROTOCOL_ENV_REPORT_PAYLOAD_LENGTH))
+    {
+        return false;
+    }
+
+    payload = frame->payload;
+    report->uptime_ms = app_protocol_get_u32_le(&payload[0]);
+    report->sample_sequence = app_protocol_get_u32_le(&payload[4]);
+    report->temperature_milli_c = (int32_t)app_protocol_get_u32_le(&payload[8]);
+    report->humidity_milli_rh = app_protocol_get_u32_le(&payload[12]);
+    report->illuminance_milli_lux = app_protocol_get_u32_le(&payload[16]);
+    report->valid_flags = payload[20];
+    report->aht20_status = payload[21];
+    report->bh1750_status = payload[22];
+    report->aht20_comm_errors = app_protocol_get_u32_le(&payload[24]);
+    report->bh1750_comm_errors = app_protocol_get_u32_le(&payload[28]);
+    report->aht20_data_errors = app_protocol_get_u32_le(&payload[32]);
+    report->bh1750_data_errors = app_protocol_get_u32_le(&payload[36]);
+
+    return true;
+}

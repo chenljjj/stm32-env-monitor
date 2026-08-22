@@ -25,8 +25,10 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "app_log.h"
+#include "app_link.h"
 #include "app_display.h"
 #include "app_monitor.h"
+#include "app_protocol.h"
 #include "app_status.h"
 /* USER CODE END Includes */
 
@@ -54,6 +56,12 @@ static app_status_t app_status;
 static app_monitor_t app_monitor;
 /* OLED 页面状态与 128x64 显示缓存。 */
 static app_display_t app_display;
+/* USART1 二进制协议的发送序号和最近状态。 */
+static uint16_t app_protocol_tx_sequence;
+static HAL_StatusTypeDef app_protocol_tx_status;
+static uint32_t app_protocol_tx_error_count;
+/* USART1 接收解析器与 ACK 统计。 */
+static app_link_t app_link;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -64,6 +72,85 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+#define APP_PROTOCOL_UART_TIMEOUT_MS 20U
+#define APP_PROTOCOL_FLAG_CLIMATE_VALID 0x01U
+#define APP_PROTOCOL_FLAG_ILLUMINANCE_VALID 0x02U
+#define APP_PROTOCOL_FLAG_DISPLAY_READY 0x04U
+
+/* 将最新采样快照打包为 ENV_REPORT，并通过 USART1 发送给 ESP32。 */
+static HAL_StatusTypeDef app_protocol_send_env_report(const app_monitor_t *monitor,
+                                                      const app_display_t *display,
+                                                      app_link_t *link)
+{
+  app_protocol_env_report_t report = {0};
+  uint8_t payload[APP_PROTOCOL_ENV_REPORT_PAYLOAD_LENGTH];
+  uint8_t frame[APP_PROTOCOL_MAX_FRAME_LENGTH];
+  uint16_t frame_length = 0U;
+  uint16_t sequence;
+  HAL_StatusTypeDef status;
+
+  if ((monitor == NULL) || (display == NULL) || (link == NULL))
+  {
+    return HAL_ERROR;
+  }
+
+  report.uptime_ms = HAL_GetTick();
+  report.sample_sequence = monitor->sample_sequence;
+  report.temperature_milli_c = monitor->climate.temperature_milli_c;
+  report.humidity_milli_rh = monitor->climate.humidity_milli_rh;
+  report.illuminance_milli_lux = monitor->illuminance_milli_lux;
+  report.aht20_status = (uint8_t)monitor->aht20_status;
+  report.bh1750_status = (uint8_t)monitor->bh1750_status;
+  report.aht20_comm_errors = monitor->aht20_error_count;
+  report.bh1750_comm_errors = monitor->bh1750_error_count;
+  report.aht20_data_errors = monitor->aht20_data_error_count;
+  report.bh1750_data_errors = monitor->bh1750_data_error_count;
+
+  if (monitor->climate_valid != 0U)
+  {
+    report.valid_flags |= APP_PROTOCOL_FLAG_CLIMATE_VALID;
+  }
+  if (monitor->illuminance_valid != 0U)
+  {
+    report.valid_flags |= APP_PROTOCOL_FLAG_ILLUMINANCE_VALID;
+  }
+  if (display->initialized != 0U)
+  {
+    report.valid_flags |= APP_PROTOCOL_FLAG_DISPLAY_READY;
+  }
+
+  app_protocol_pack_env_report(&report, payload);
+  sequence = app_protocol_tx_sequence;
+  status = app_protocol_encode(APP_PROTOCOL_TYPE_ENV_REPORT,
+                               sequence,
+                               payload,
+                               sizeof(payload),
+                               frame,
+                               sizeof(frame),
+                               &frame_length);
+  if (status != HAL_OK)
+  {
+    ++app_protocol_tx_error_count;
+    return status;
+  }
+
+  status = HAL_UART_Transmit(&huart1,
+                             frame,
+                             frame_length,
+                             APP_PROTOCOL_UART_TIMEOUT_MS);
+  if (status == HAL_OK)
+  {
+    app_link_note_env_report_sent(link, sequence);
+    ++app_protocol_tx_sequence;
+  }
+  else
+  {
+    ++app_protocol_tx_error_count;
+  }
+
+  return status;
+}
 
 /* USER CODE END 0 */
 
@@ -106,6 +193,11 @@ int main(void)
                   app_log_write(&huart2, "stm32-env-monitor boot\r\n"));
   app_monitor_init(&app_monitor);
   app_display_init(&app_display);
+  app_protocol_tx_status = HAL_BUSY;
+  /* USART1 的 ACK 接收使用中断，优先级高于 SysTick。 */
+  HAL_NVIC_SetPriority(USART1_IRQn, 1U, 0U);
+  HAL_NVIC_EnableIRQ(USART1_IRQn);
+  app_link_init(&app_link, &huart1);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -123,6 +215,10 @@ int main(void)
     {
       int32_t temperature_fraction = app_monitor.climate.temperature_milli_c % 1000;
 
+      app_protocol_tx_status = app_protocol_send_env_report(&app_monitor,
+                                                             &app_display,
+                                                             &app_link);
+
       if (temperature_fraction < 0)
       {
         temperature_fraction = -temperature_fraction;
@@ -131,7 +227,8 @@ int main(void)
       /* 同时输出有效标志和错误次数，便于未接硬件时定位问题。 */
       (void)app_log_printf(&huart2,
                            "sample=%lu aht=%s valid=%u t=%ld.%03ldC h=%lu.%03lu%% "
-                           "bh=%s valid=%u l=%lu.%03lulx comm=%lu/%lu data=%lu/%lu\r\n",
+                           "bh=%s valid=%u l=%lu.%03lulx comm=%lu/%lu data=%lu/%lu "
+                           "uart1=%s txerr=%lu ack=%lu rxerr=%lu ackerr=%lu\r\n",
                            (unsigned long)app_monitor.sample_sequence,
                            app_monitor_status_name(app_monitor.aht20_status),
                            (unsigned int)app_monitor.climate_valid,
@@ -146,7 +243,12 @@ int main(void)
                            (unsigned long)app_monitor.aht20_error_count,
                            (unsigned long)app_monitor.bh1750_error_count,
                            (unsigned long)app_monitor.aht20_data_error_count,
-                           (unsigned long)app_monitor.bh1750_data_error_count);
+                           (unsigned long)app_monitor.bh1750_data_error_count,
+                           app_monitor_status_name(app_protocol_tx_status),
+                           (unsigned long)app_protocol_tx_error_count,
+                           (unsigned long)app_link.ack_count,
+                           (unsigned long)app_link.rx_error_count,
+                           (unsigned long)app_link.ack_error_count);
     }
 
     app_display_update(&app_display,
@@ -197,6 +299,23 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+/* USART1 每接收一个字节进入一次中断，协议解析器随后立即重新挂起接收。 */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance == USART1)
+  {
+    app_link_on_uart_rx_complete(&app_link, huart);
+  }
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance == USART1)
+  {
+    app_link_on_uart_error(&app_link, huart);
+  }
+}
 
 /* USER CODE END 4 */
 
