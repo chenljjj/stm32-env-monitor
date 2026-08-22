@@ -99,10 +99,11 @@ int main(void)
   MX_GPIO_Init();
   MX_USART1_UART_Init();
   MX_I2C1_Init();
+  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
   /* 日志失败仅改变状态指示，不阻止主程序继续运行。 */
   app_status_init(&app_status,
-                  app_log_write(&huart1, "stm32-env-monitor boot\r\n"));
+                  app_log_write(&huart2, "stm32-env-monitor boot\r\n"));
   app_monitor_init(&app_monitor);
   app_display_init(&app_display);
   /* USER CODE END 2 */
@@ -128,22 +129,24 @@ int main(void)
       }
 
       /* 同时输出有效标志和错误次数，便于未接硬件时定位问题。 */
-      (void)app_log_printf(&huart1,
-                           "sample=%lu aht=%d valid=%u t=%ld.%03ldC h=%lu.%03lu%% "
-                           "bh=%d valid=%u l=%lu.%03lulx err=%lu/%lu\r\n",
+      (void)app_log_printf(&huart2,
+                           "sample=%lu aht=%s valid=%u t=%ld.%03ldC h=%lu.%03lu%% "
+                           "bh=%s valid=%u l=%lu.%03lulx comm=%lu/%lu data=%lu/%lu\r\n",
                            (unsigned long)app_monitor.sample_sequence,
-                           (int)app_monitor.aht20_status,
+                           app_monitor_status_name(app_monitor.aht20_status),
                            (unsigned int)app_monitor.climate_valid,
                            (long)(app_monitor.climate.temperature_milli_c / 1000),
                            (long)temperature_fraction,
                            (unsigned long)(app_monitor.climate.humidity_milli_rh / 1000U),
                            (unsigned long)(app_monitor.climate.humidity_milli_rh % 1000U),
-                           (int)app_monitor.bh1750_status,
+                           app_monitor_status_name(app_monitor.bh1750_status),
                            (unsigned int)app_monitor.illuminance_valid,
                            (unsigned long)(app_monitor.illuminance_milli_lux / 1000U),
                            (unsigned long)(app_monitor.illuminance_milli_lux % 1000U),
                            (unsigned long)app_monitor.aht20_error_count,
-                           (unsigned long)app_monitor.bh1750_error_count);
+                           (unsigned long)app_monitor.bh1750_error_count,
+                           (unsigned long)app_monitor.aht20_data_error_count,
+                           (unsigned long)app_monitor.bh1750_data_error_count);
     }
 
     app_display_update(&app_display,

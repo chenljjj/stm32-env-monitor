@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#define APP_LOG_BUFFER_SIZE 128U
+#define APP_LOG_BUFFER_SIZE 192U
 
 HAL_StatusTypeDef app_log_write(UART_HandleTypeDef *huart,
                                 const char *message)

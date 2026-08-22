@@ -10,8 +10,12 @@ typedef struct
     uint32_t illuminance_milli_lux;
     HAL_StatusTypeDef aht20_status;
     HAL_StatusTypeDef bh1750_status;
+    /* I2C 初始化或读取失败次数。 */
     uint32_t aht20_error_count;
     uint32_t bh1750_error_count;
+    /* 通信成功但数据超出传感器保证范围的次数。 */
+    uint32_t aht20_data_error_count;
+    uint32_t bh1750_data_error_count;
     uint32_t sample_sequence;
     uint32_t last_sample_tick;
     uint8_t aht20_initialized;
@@ -22,5 +26,6 @@ typedef struct
 
 void app_monitor_init(app_monitor_t *monitor);
 uint8_t app_monitor_update(app_monitor_t *monitor, I2C_HandleTypeDef *hi2c);
+const char *app_monitor_status_name(HAL_StatusTypeDef status);
 
 #endif
