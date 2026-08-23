@@ -135,17 +135,19 @@ static HAL_StatusTypeDef app_protocol_send_env_report(const app_monitor_t *monit
     return status;
   }
 
+  /* ESP32 回 ACK 很快，必须在发送前登记本帧序号。 */
+  app_link_arm_env_report_ack(link, sequence);
   status = HAL_UART_Transmit(&huart1,
                              frame,
                              frame_length,
                              APP_PROTOCOL_UART_TIMEOUT_MS);
   if (status == HAL_OK)
   {
-    app_link_note_env_report_sent(link, sequence);
     ++app_protocol_tx_sequence;
   }
   else
   {
+    app_link_cancel_env_report_ack(link);
     ++app_protocol_tx_error_count;
   }
 
@@ -228,7 +230,7 @@ int main(void)
       (void)app_log_printf(&huart2,
                            "sample=%lu aht=%s valid=%u t=%ld.%03ldC h=%lu.%03lu%% "
                            "bh=%s valid=%u l=%lu.%03lulx comm=%lu/%lu data=%lu/%lu "
-                           "uart1=%s txerr=%lu ack=%lu rxerr=%lu ackerr=%lu\r\n",
+                           "uart1=%s txerr=%lu ack=%lu rxerr=%lu ackerr=%lu exp=%u got=%u af=0x%02X\r\n",
                            (unsigned long)app_monitor.sample_sequence,
                            app_monitor_status_name(app_monitor.aht20_status),
                            (unsigned int)app_monitor.climate_valid,
@@ -248,7 +250,10 @@ int main(void)
                            (unsigned long)app_protocol_tx_error_count,
                            (unsigned long)app_link.ack_count,
                            (unsigned long)app_link.rx_error_count,
-                           (unsigned long)app_link.ack_error_count);
+                           (unsigned long)app_link.ack_error_count,
+                           (unsigned int)app_link.expected_ack_sequence,
+                           (unsigned int)app_link.last_received_ack_sequence,
+                           (unsigned int)app_link.last_ack_error_flags);
     }
 
     app_display_update(&app_display,

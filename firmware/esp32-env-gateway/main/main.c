@@ -11,7 +11,8 @@
 #define APP_UART_RX_PIN           GPIO_NUM_25
 #define APP_UART_TX_PIN           GPIO_NUM_26
 #define APP_UART_RX_BUFFER_SIZE   512
-#define APP_UART_READ_TIMEOUT_MS  1000
+/* 未收满缓冲区时最多等待 20ms，确保 ACK 不会落后一个采样周期。 */
+#define APP_UART_READ_TIMEOUT_MS  20
 
 #define APP_PROTOCOL_FLAG_CLIMATE_VALID      0x01U
 #define APP_PROTOCOL_FLAG_ILLUMINANCE_VALID  0x02U
@@ -110,8 +111,9 @@ static void app_handle_frame(const app_protocol_frame_t *frame)
 {
     if (frame->type == APP_PROTOCOL_TYPE_ENV_REPORT)
     {
-        app_log_env_report(frame);
+        /* ACK 优先于调试日志，避免日志输出拖慢协议确认。 */
         app_uart_send_ack(frame->sequence, frame->type);
+        app_log_env_report(frame);
         return;
     }
 

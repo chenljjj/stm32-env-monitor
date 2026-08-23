@@ -26,13 +26,40 @@ static uint16_t app_link_get_u16_le(const uint8_t *buffer)
 static void app_link_handle_ack(app_link_t *link)
 {
   const uint8_t *payload = link->frame.payload;
-  const uint16_t acknowledged_sequence = app_link_get_u16_le(payload);
+  uint16_t acknowledged_sequence = 0U;
+  uint8_t error_flags = 0U;
 
-  /* ACK 仅确认已发送的 ENV_REPORT，result=0 代表 ESP32 成功处理。 */
-  if ((link->frame.payload_length != APP_PROTOCOL_ACK_PAYLOAD_LENGTH) ||
-      (payload[2] != APP_PROTOCOL_TYPE_ENV_REPORT) ||
-      (link->awaiting_ack == 0U) ||
-      (acknowledged_sequence != link->expected_ack_sequence))
+  if (link->frame.payload_length != APP_PROTOCOL_ACK_PAYLOAD_LENGTH)
+  {
+    error_flags |= APP_LINK_ACK_ERROR_LENGTH;
+  }
+  else
+  {
+    acknowledged_sequence = app_link_get_u16_le(payload);
+    link->last_received_ack_sequence = acknowledged_sequence;
+    link->last_received_ack_type = payload[2];
+    link->last_received_ack_result = payload[3];
+
+    if (payload[2] != APP_PROTOCOL_TYPE_ENV_REPORT)
+    {
+      error_flags |= APP_LINK_ACK_ERROR_TYPE;
+    }
+    if (link->awaiting_ack == 0U)
+    {
+      error_flags |= APP_LINK_ACK_ERROR_NOT_WAITING;
+    }
+    if (acknowledged_sequence != link->expected_ack_sequence)
+    {
+      error_flags |= APP_LINK_ACK_ERROR_SEQUENCE;
+    }
+    if (payload[3] != 0U)
+    {
+      error_flags |= APP_LINK_ACK_ERROR_RESULT;
+    }
+  }
+
+  link->last_ack_error_flags = error_flags;
+  if (error_flags != 0U)
   {
     ++link->ack_error_count;
     return;
@@ -41,14 +68,7 @@ static void app_link_handle_ack(app_link_t *link)
   link->last_ack_sequence = acknowledged_sequence;
   link->last_ack_result = payload[3];
   link->awaiting_ack = 0U;
-  if (payload[3] == 0U)
-  {
-    ++link->ack_count;
-  }
-  else
-  {
-    ++link->ack_error_count;
-  }
+  ++link->ack_count;
 }
 
 void app_link_init(app_link_t *link, UART_HandleTypeDef *huart)
@@ -65,12 +85,22 @@ void app_link_init(app_link_t *link, UART_HandleTypeDef *huart)
   app_link_start_receive(link);
 }
 
-void app_link_note_env_report_sent(app_link_t *link, uint16_t sequence)
+/* 先登记期待的 ACK，避免 ESP32 回包早于发送函数返回。 */
+void app_link_arm_env_report_ack(app_link_t *link, uint16_t sequence)
 {
   if (link != NULL)
   {
     link->expected_ack_sequence = sequence;
     link->awaiting_ack = 1U;
+  }
+}
+
+/* 发送失败时撤销期待状态，避免旧序号影响后续确认。 */
+void app_link_cancel_env_report_ack(app_link_t *link)
+{
+  if (link != NULL)
+  {
+    link->awaiting_ack = 0U;
   }
 }
 

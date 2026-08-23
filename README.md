@@ -10,9 +10,9 @@
 | 调试日志 | 已完成 | USART2（PA2/PA3），115200 8-N-1。 |
 | BH1750 光照采集 | 已实测 | I2C1 实测可读取有效照度值。 |
 | SSD1306 OLED 显示 | 已实测 | I2C1 实测显示环境数据和状态。 |
-| AHT20 温湿度采集 | 已实现待实测 | 驱动与数据校验逻辑已完成，等待硬件接入。 |
-| STM32—ESP32 协议 | 已实现待联调 | 帧编码、CRC 与接收解析器已完成。 |
-| ESP32 网关工程 | 已建立 | ESP-IDF 工程可成功构建，Wi-Fi/MQTT 尚未接入。 |
+| AHT20 温湿度采集 | 已实测 | I2C1 实测可稳定读取温湿度。 |
+| STM32—ESP32 协议 | 已实测 | USART1 双向帧收发、CRC、序号 ACK 与异常统计均已验证。 |
+| ESP32 网关工程 | UART 已实测 | ESP-IDF 网关已解析环境帧并返回 ACK；Wi-Fi/MQTT 尚未接入。 |
 | FreeRTOS | 未启用 | 计划在轮询功能稳定后引入。 |
 
 ## 2. 系统架构
@@ -39,11 +39,13 @@
 | AHT20 | I2C 地址 `0x38` | 温度、相对湿度。 |
 | BH1750 | I2C 地址 `0x23` | ADDR 接地时使用该地址；连续高分辨率模式。 |
 | SSD1306 | I2C 地址 `0x3C` | 0.96 英寸、128×64、I2C 接口。 |
-| STM32—ESP32 | USART1：PA9/PA10 | 115200、8-N-1；PA9 TX → ESP32 RX，PA10 RX ← ESP32 TX。 |
+| STM32—ESP32 | USART1：PA9/PA10 | 115200、8-N-1；PA9 TX → ESP32 GPIO25，PA10 RX ← ESP32 GPIO26。 |
 | 调试串口 | USART2：PA2/PA3 | 115200、8-N-1；目前使用 PA2 TX 输出日志。 |
 | 调试下载 | SWD：PA13/PA14 | 连接 ST-LINK。 |
 
 所有 I2C 外设使用 3.3 V 供电并共地。ESP32 必须使用自身 USB 或足够电流能力的独立 5 V 电源，不能由 Blue Pill 的 3.3 V 引脚供电。
+
+STM32 与 ESP32 同时通过 USB 供电时，只连接两根 UART 信号线和一根 GND，不连接两块板之间的 `3.3V`、`5V` 或 `VIN`。
 
 ## 4. 软件组成
 
@@ -62,6 +64,7 @@
 | `app_log` | USART2 阻塞式文本日志输出。 |
 | `app_status` | PC13 LED 的非阻塞状态指示。 |
 | `app_protocol` | STM32—ESP32 帧编码、CRC 校验、环境数据打包和字节流解析。 |
+| `app_link` | USART1 单字节中断接收、ACK 状态机和链路错误统计。 |
 
 环境数据在内部采用定点整数，避免在驱动层依赖浮点运算：温度单位为 `milli °C`，湿度为 `milli %RH`，照度为 `milli lx`。
 
@@ -69,7 +72,7 @@
 
 路径：`firmware/esp32-env-gateway`
 
-工程基于 ESP-IDF，目标芯片为 `esp32`（ESP32-WROOM-32E）。当前仅保留能独立构建的最小工程，后续将加入 UART 接收、Wi-Fi 状态机、MQTT 客户端、重连与上报逻辑。
+工程基于 ESP-IDF，目标芯片为 `esp32`（ESP32-WROOM-32E）。UART0 使用板载 CP2102 连接电脑，负责烧录和日志；UART2 重映射至 `GPIO25/RX`、`GPIO26/TX`，负责接收 STM32 环境帧并优先返回 ACK。后续将加入 Wi-Fi 状态机、MQTT 客户端、重连与上报逻辑。
 
 ## 5. STM32—ESP32 UART 协议
 
@@ -89,6 +92,9 @@
 - 多字节字段：显式采用小端序。
 - 当前消息类型：`ENV_REPORT`、`PING`、`ACK`、`NET_STATUS`、`PONG`。
 - `ENV_REPORT` 载荷固定为 40 字节，包含运行时间、采样序号、温湿度、照度、有效标志与错误计数。
+- STM32 每秒发送一帧 `ENV_REPORT`；ESP32 成功解析后返回 `ACK`。STM32 发送前先登记期待的序号，收到 ACK 后校验其长度、消息类型、序号与结果码。
+
+详细帧布局、ACK 机制、接线与实测调试记录见 [UART 协议与联调记录](docs/03-stm32-esp32-uart-protocol-debug.md)。
 
 ## 6. 构建与烧录
 
@@ -110,7 +116,13 @@
    idf.py build
    ```
 
-硬件到位后再连接 ESP32 USB，并使用 `idf.py flash monitor` 完成烧录与串口监视。
+ESP32 连接 USB 后应在设备管理器中识别为 CP2102 串口。选择对应 `COMx` 后执行：
+
+```powershell
+idf.py -p COMx flash monitor
+```
+
+本开发板实测 Flash 为 16 MB，ESP-IDF 的 `Serial flasher config > Flash size` 需设置为 `16 MB`。
 
 ## 7. 目录结构
 
@@ -127,12 +139,12 @@ stm32-env-monitor/
 
 ## 8. 后续工作
 
-1. 接入 AHT20，完成温湿度硬件验证与异常场景测试。
-2. 接入 ESP32，验证 UART 收发、帧同步、CRC 错误处理与应答机制。
-3. 实现 ESP32 Wi-Fi/MQTT 连接、断线重连与网络状态回传。
-4. 将稳定的轮询流程拆分为 FreeRTOS 任务、队列与 I2C 互斥访问。
+1. 实现 ESP32 Wi-Fi/MQTT 连接、断线重连与网络状态回传。
+2. 补充 UART 帧超时、重传和网络状态回传机制。
+3. 将稳定的轮询流程拆分为 FreeRTOS 任务、队列与 I2C 互斥访问。
 
 ## 9. 相关文档
 
 - [CubeIDE 基线配置](docs/01-cubeide-bringup.md)
 - [开发路线](docs/02-roadmap.md)
+- [STM32—ESP32 UART 协议与联调记录](docs/03-stm32-esp32-uart-protocol-debug.md)
