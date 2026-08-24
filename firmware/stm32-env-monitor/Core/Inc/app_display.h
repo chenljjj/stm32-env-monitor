@@ -17,6 +17,7 @@ void app_display_init(app_display_t *display);
 void app_display_update(app_display_t *display,
                         I2C_HandleTypeDef *hi2c,
                         const app_monitor_t *monitor,
+                        uint8_t network_flags,
                         uint8_t data_changed);
 
 #endif

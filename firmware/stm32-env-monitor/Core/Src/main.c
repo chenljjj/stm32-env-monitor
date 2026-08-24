@@ -86,6 +86,8 @@ typedef struct
 {
   app_monitor_t monitor;
   uint8_t display_ready;
+  /* ESP32 通过 USART1 回传的 Wi-Fi/MQTT 状态，供 OLED 显示。 */
+  uint8_t network_flags;
 } app_runtime_snapshot_t;
 
 static osMutexId_t app_i2c_mutex;
@@ -396,6 +398,8 @@ static void app_runtime_sensor_task(void *argument)
         snapshot.monitor = app_monitor;
         /* OLED 由显示任务独占，此标志允许链路任务使用最近已知状态。 */
         snapshot.display_ready = app_display.initialized;
+        /* 8 位标志由 USART1 接收中断更新，读取是原子的，最多滞后一采样周期。 */
+        snapshot.network_flags = app_link.network_flags;
 
         if (osMessageQueuePut(app_display_queue, &snapshot, 0U, 0U) != osOK)
         {
@@ -438,7 +442,11 @@ static void app_runtime_display_task(void *argument)
     if ((has_snapshot != 0U) &&
         (osMutexAcquire(app_i2c_mutex, osWaitForever) == osOK))
     {
-      app_display_update(&app_display, &hi2c1, &snapshot.monitor, data_changed);
+      app_display_update(&app_display,
+                         &hi2c1,
+                         &snapshot.monitor,
+                         snapshot.network_flags,
+                         data_changed);
       (void)osMutexRelease(app_i2c_mutex);
     }
   }
