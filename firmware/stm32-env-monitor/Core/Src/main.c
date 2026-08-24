@@ -32,6 +32,8 @@
 #include "app_protocol.h"
 #include "app_runtime.h"
 #include "app_status.h"
+#include "FreeRTOS.h"
+#include "task.h"
 #include <string.h>
 /* USER CODE END Includes */
 
@@ -89,8 +91,14 @@ typedef struct
 static osMutexId_t app_i2c_mutex;
 static osMessageQueueId_t app_display_queue;
 static osMessageQueueId_t app_link_queue;
-static uint32_t app_display_queue_drop_count;
-static uint32_t app_link_queue_drop_count;
+static osThreadId_t app_sensor_task_handle;
+static osThreadId_t app_display_task_handle;
+static osThreadId_t app_link_task_handle;
+static osThreadId_t app_health_task_handle;
+static volatile uint32_t app_display_queue_drop_count;
+static volatile uint32_t app_link_queue_drop_count;
+static volatile uint32_t app_display_queue_peak_count;
+static volatile uint32_t app_link_queue_peak_count;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -114,6 +122,9 @@ void MX_FREERTOS_Init(void);
 #define APP_RTOS_LINK_WAIT_TICKS 20U
 #define APP_RTOS_HEALTH_PERIOD_TICKS 100U
 #define APP_RTOS_SNAPSHOT_QUEUE_LENGTH 3U
+#define APP_RTOS_RESOURCE_LOG_SAMPLE_PERIOD 60U
+
+static uint32_t app_runtime_stack_free_bytes(osThreadId_t task_handle);
 
 /* 将最新采样快照打包为 ENV_REPORT，并通过 USART1 发送给 ESP32。 */
 static HAL_StatusTypeDef app_protocol_send_env_report(const app_monitor_t *monitor,
@@ -320,6 +331,56 @@ static void app_runtime_log_snapshot(const app_runtime_snapshot_t *snapshot)
                        (unsigned int)app_link.last_network_reason);
 }
 
+/* 输出堆、栈和队列峰值，用于长稳测试而非功能判定。 */
+static void app_runtime_log_resources(void)
+{
+  (void)app_log_printf(&huart2,
+                       "rtos heap=%lu min=%lu stack=%lu/%lu/%lu/%lu "
+                       "q=%lu/%lu peak=%lu/%lu qdrop=%lu/%lu\r\n",
+                       (unsigned long)xPortGetFreeHeapSize(),
+                       (unsigned long)xPortGetMinimumEverFreeHeapSize(),
+                       (unsigned long)app_runtime_stack_free_bytes(app_sensor_task_handle),
+                       (unsigned long)app_runtime_stack_free_bytes(app_display_task_handle),
+                       (unsigned long)app_runtime_stack_free_bytes(app_link_task_handle),
+                       (unsigned long)app_runtime_stack_free_bytes(app_health_task_handle),
+                       (unsigned long)osMessageQueueGetCount(app_display_queue),
+                       (unsigned long)osMessageQueueGetCount(app_link_queue),
+                       (unsigned long)app_display_queue_peak_count,
+                       (unsigned long)app_link_queue_peak_count,
+                       (unsigned long)app_display_queue_drop_count,
+                       (unsigned long)app_link_queue_drop_count);
+}
+
+/* FreeRTOS 返回的高水位以 StackType_t 个数为单位，转换为字节便于阅读。 */
+static uint32_t app_runtime_stack_free_bytes(osThreadId_t task_handle)
+{
+  if (task_handle == NULL)
+  {
+    return 0U;
+  }
+
+  return (uint32_t)(uxTaskGetStackHighWaterMark((TaskHandle_t)task_handle) *
+                    sizeof(StackType_t));
+}
+
+/* 采样任务是两条快照队列的唯一生产者，因此在此记录峰值。 */
+static void app_runtime_update_queue_peak(osMessageQueueId_t queue,
+                                          volatile uint32_t *peak_count)
+{
+  uint32_t current_count;
+
+  if ((queue == NULL) || (peak_count == NULL))
+  {
+    return;
+  }
+
+  current_count = osMessageQueueGetCount(queue);
+  if (current_count > *peak_count)
+  {
+    *peak_count = current_count;
+  }
+}
+
 static void app_runtime_sensor_task(void *argument)
 {
   app_runtime_snapshot_t snapshot;
@@ -340,10 +401,12 @@ static void app_runtime_sensor_task(void *argument)
         {
           ++app_display_queue_drop_count;
         }
+        app_runtime_update_queue_peak(app_display_queue, &app_display_queue_peak_count);
         if (osMessageQueuePut(app_link_queue, &snapshot, 0U, 0U) != osOK)
         {
           ++app_link_queue_drop_count;
         }
+        app_runtime_update_queue_peak(app_link_queue, &app_link_queue_peak_count);
       }
       (void)osMutexRelease(app_i2c_mutex);
     }
@@ -384,6 +447,7 @@ static void app_runtime_display_task(void *argument)
 static void app_runtime_link_task(void *argument)
 {
   app_runtime_snapshot_t snapshot;
+  uint32_t last_resource_log_sample = 0U;
 
   (void)argument;
   for (;;)
@@ -400,6 +464,14 @@ static void app_runtime_link_task(void *argument)
                                                              &app_link,
                                                              &app_protocol_reliability);
       app_runtime_log_snapshot(&snapshot);
+
+      if ((last_resource_log_sample == 0U) ||
+          ((snapshot.monitor.sample_sequence - last_resource_log_sample) >=
+           APP_RTOS_RESOURCE_LOG_SAMPLE_PERIOD))
+      {
+        last_resource_log_sample = snapshot.monitor.sample_sequence;
+        app_runtime_log_resources();
+      }
     }
   }
 }
@@ -460,20 +532,48 @@ void app_runtime_start(void)
                                      sizeof(app_runtime_snapshot_t),
                                      NULL);
 
+  app_sensor_task_handle = osThreadNew(app_runtime_sensor_task, NULL, &sensor_attributes);
+  app_display_task_handle = osThreadNew(app_runtime_display_task, NULL, &display_attributes);
+  app_health_task_handle = osThreadNew(app_runtime_health_task, NULL, &health_attributes);
+  /* 链路任务最后创建，首次输出资源日志时四个任务句柄均已有效。 */
+  app_link_task_handle = osThreadNew(app_runtime_link_task, NULL, &link_attributes);
+
   if ((app_i2c_mutex == NULL) || (app_display_queue == NULL) ||
-      (app_link_queue == NULL) ||
-      (osThreadNew(app_runtime_sensor_task, NULL, &sensor_attributes) == NULL) ||
-      (osThreadNew(app_runtime_display_task, NULL, &display_attributes) == NULL) ||
-      (osThreadNew(app_runtime_link_task, NULL, &link_attributes) == NULL) ||
-      (osThreadNew(app_runtime_health_task, NULL, &health_attributes) == NULL))
+      (app_link_queue == NULL) || (app_sensor_task_handle == NULL) ||
+      (app_display_task_handle == NULL) || (app_link_task_handle == NULL) ||
+      (app_health_task_handle == NULL))
   {
     /* 堆不足时保留 defaultTask，使 LED 常亮并避免继续运行半初始化系统。 */
     app_status.startup_status = HAL_ERROR;
+    (void)app_log_write(&huart2, "FreeRTOS resource creation failed\r\n");
     for (;;)
     {
       app_status_update(&app_status, LED_PC13_GPIO_Port, LED_PC13_Pin);
       (void)osDelay(APP_RTOS_HEALTH_PERIOD_TICKS);
     }
+  }
+}
+
+/* 堆耗尽或任务栈越界后不再继续执行未知状态的业务逻辑。 */
+void vApplicationMallocFailedHook(void)
+{
+  taskDISABLE_INTERRUPTS();
+  HAL_GPIO_WritePin(LED_PC13_GPIO_Port, LED_PC13_Pin, GPIO_PIN_RESET);
+  for (;;)
+  {
+    __NOP();
+  }
+}
+
+void vApplicationStackOverflowHook(TaskHandle_t task_handle, char *task_name)
+{
+  (void)task_handle;
+  (void)task_name;
+  taskDISABLE_INTERRUPTS();
+  HAL_GPIO_WritePin(LED_PC13_GPIO_Port, LED_PC13_Pin, GPIO_PIN_RESET);
+  for (;;)
+  {
+    __NOP();
   }
 }
 

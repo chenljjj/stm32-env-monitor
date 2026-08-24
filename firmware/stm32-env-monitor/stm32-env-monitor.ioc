@@ -2,9 +2,11 @@
 CAD.formats=
 CAD.pinconfig=
 CAD.provider=
-FREERTOS.IPParameters=Tasks01,configTOTAL_HEAP_SIZE
+FREERTOS.IPParameters=Tasks01,configTOTAL_HEAP_SIZE,configCHECK_FOR_STACK_OVERFLOW,configUSE_MALLOC_FAILED_HOOK
 FREERTOS.Tasks01=defaultTask,24,128,StartDefaultTask,Default,NULL,Dynamic,NULL,NULL
+FREERTOS.configCHECK_FOR_STACK_OVERFLOW=2
 FREERTOS.configTOTAL_HEAP_SIZE=10240
+FREERTOS.configUSE_MALLOC_FAILED_HOOK=1
 File.Version=6
 GPIO.groupedBy=Group By Peripherals
 I2C1.I2C_Mode=I2C_Fast

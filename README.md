@@ -191,7 +191,8 @@ stm32-env-monitor/
 │   ├── 02-项目实现路线图.md
 │   ├── 03-STM32与ESP32串口协议与调试.md
 │   ├── 04-ESP32-WiFi-MQTT-TLS与遥测队列.md
-│   └── 05-STM32-FreeRTOS运行时设计.md
+│   ├── 05-STM32-FreeRTOS运行时设计.md
+│   └── 06-运行时资源监控与长稳测试.md
 └── README.md
 ```
 
@@ -209,3 +210,4 @@ stm32-env-monitor/
 - [STM32—ESP32 UART 协议与联调记录](docs/03-STM32与ESP32串口协议与调试.md)
 - [ESP32 Wi-Fi、MQTT/TLS 与遥测队列](docs/04-ESP32-WiFi-MQTT-TLS与遥测队列.md)
 - [STM32 FreeRTOS 运行时设计](docs/05-STM32-FreeRTOS运行时设计.md)
+- [运行时资源监控与长稳测试](docs/06-运行时资源监控与长稳测试.md)
