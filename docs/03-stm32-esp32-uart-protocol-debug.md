@@ -1,6 +1,6 @@
 # STM32—ESP32 UART 协议与联调记录
 
-本文记录 `stm32-env-monitor` 当前使用的二进制 UART 协议、实际接线、ACK 状态机和实测调试过程。STM32 负责采样和本地显示；ESP32 负责网关处理，并将在后续接入 Wi-Fi 与 MQTT。
+本文记录 `stm32-env-monitor` 当前使用的二进制 UART 协议、实际接线、ACK/网络状态机制和实测调试过程。STM32 负责采样和本地显示；ESP32 负责网关处理，并将有效采样加入 FreeRTOS 队列后交给 MQTT/TLS 模块。
 
 ## 1. 通信通道与接线
 
@@ -45,7 +45,7 @@ ESP32 UART0 (GPIO1/GPIO3) ←→ CP2102 / PC 烧录和日志
 | `ENV_REPORT` | `0x01` | STM32 → ESP32 | 每秒上报一次环境采样快照。 |
 | `PING` | `0x02` | 预留 | 后续链路探测。 |
 | `ACK` | `0x80` | ESP32 → STM32 | 确认已处理 `ENV_REPORT`。 |
-| `NET_STATUS` | `0x81` | 预留 | 后续回传 Wi-Fi/MQTT 状态。 |
+| `NET_STATUS` | `0x81` | ESP32 → STM32 | 回传 Wi-Fi/MQTT 状态、变化原因和断线计数。 |
 | `PONG` | `0x82` | 预留 | 后续响应 `PING`。 |
 
 `ENV_REPORT` 载荷固定 40 字节：
@@ -62,27 +62,63 @@ ESP32 UART0 (GPIO1/GPIO3) ←→ CP2102 / PC 烧录和日志
 | 23 | `reserved` | `uint8` | 当前写 0。 |
 | 24、28、32、36 | 错误计数 | `uint32` | 两个传感器的通信错误和数据异常次数。 |
 
-`ACK` 载荷固定 4 字节：偏移 0~1 是被确认的 STM32 帧序号（`uint16` 小端），偏移 2 是被确认类型（当前必须为 `ENV_REPORT`），偏移 3 是处理结果（`0` 表示成功）。
+`ACK` 载荷固定 4 字节：偏移 0~1 是被确认的 STM32 帧序号（`uint16` 小端），偏移 2 是被确认类型（当前必须为 `ENV_REPORT`），偏移 3 是处理结果。
+
+| ACK 结果 | 含义 |
+| ---: | --- |
+| `0x00` | 帧校验通过且 `ENV_REPORT` 已成功解包。 |
+| `0x01` | 消息类型暂不支持。 |
+| `0x02` | 消息类型已知，但载荷长度或格式无效。 |
+
+ACK 只确认 UART 协议处理，不表示数据已经进入 ESP-MQTT outbox，更不表示 Broker 已返回 PUBACK。
+
+`NET_STATUS` 载荷固定 12 字节：
+
+| 偏移 | 字段 | 类型 | 说明 |
+| ---: | --- | --- | --- |
+| 0 | `flags` | `uint8` | bit0：Wi-Fi 已连接；bit1：MQTT 已连接；其余位必须为 0。 |
+| 1 | `reason` | `uint8` | 本次快照的触发原因，见下表。 |
+| 2~3 | `reserved` | `uint16` | 保留，必须为 0。 |
+| 4~7 | `wifi_disconnect_count` | `uint32` | Wi-Fi 从已连接变为断开的累计次数，小端序。 |
+| 8~11 | `mqtt_disconnect_count` | `uint32` | MQTT 从已连接变为断开的累计次数，小端序。 |
+
+| `reason` | 含义 |
+| ---: | --- |
+| `0` | ESP32 状态模块启动。 |
+| `1` | Wi-Fi 已获得网络连接。 |
+| `2` | Wi-Fi 从已连接状态断开。 |
+| `3` | MQTT 会话已连接。 |
+| `4` | MQTT 会话从已连接状态断开。 |
+
+ESP32 在状态变化时立即发送 `NET_STATUS`；此外每处理 10 个环境样本发送一次当前快照。周期快照用于处理 STM32 晚启动、复位或偶发丢帧后的状态恢复。ACK 与 `NET_STATUS` 可能由不同任务触发，因此 ESP32 使用发送互斥锁保证每个二进制帧连续写入 UART。
 
 ## 4. ACK 状态机
 
 1. STM32 为新采样生成序号为 `N` 的 `ENV_REPORT`。
 2. STM32 **在发送前**写入 `expected_ack_sequence=N` 并置 `awaiting_ack=1`。
 3. STM32 通过 USART1 发送；若发送失败，撤销等待状态。
-4. ESP32 完整解析帧后，先回传携带 `N` 的 ACK，再输出调试日志。
+4. ESP32 完成 CRC、长度和 `ENV_REPORT` 语义解包后，立即回传携带 `N` 的成功 ACK；异常载荷返回非零结果。
 5. STM32 在 USART1 单字节接收中断中解析 ACK，校验长度、确认类型、序号和结果码。
 6. 校验通过则 `ack_count` 加一；失败则 `ack_error_count` 加一并保留诊断信息。
 
 ESP32 的 UART2 读取一次最多等待 20 ms。这样单帧不足接收缓冲区长度时，也不会因长时间等待收满而延迟 ACK。
 
-当前没有重传策略；后续应加入 ACK 超时、有限次数重传和 `NET_STATUS` 网络状态回传。
+## 5. ACK 超时、重传与去重
 
-## 5. 链路诊断与实测结果
+STM32 发送成功后缓存完整 `ENV_REPORT` 帧，等待 ACK。若 200 ms 内没有收到匹配的成功 ACK，则以**相同帧内容和相同 UART 序号**重传；最多额外发送 3 次。第三次重传仍超时后放弃该帧，并在下一个采样周期生成新帧。传感器采样、OLED 更新和日志输出不会因此停止。
+
+ESP32 对连续到达且 UART 序号等于上一有效环境帧的报文，仍立即返回成功 ACK，但不重复写入 MQTT 队列。因此丢失 ACK 时，STM32 能恢复链路，而云端不会因为相同重传帧收到重复遥测。
+
+若 ESP32 返回合法但非零的 ACK 结果（类型不支持或载荷无效），STM32 记录 ACK 语义错误并结束等待；重传相同错误载荷没有意义。CRC 错误、丢帧或没有 ACK 等不确定情况才走超时重传路径。
+
+`NET_STATUS` 已完成硬件验证：Wi-Fi 被断开时 STM32 显示 `net=--`，ESP32 恢复 IP 后显示 `net=W-`，MQTT/TLS 会话恢复后显示 `net=WM`。本轮测试未刻意断开 ESP32→STM32 的 ACK 线路，因此 UART 超时重传和重复帧去重仍保留为后续独立故障注入项。
+
+## 6. 链路诊断与实测结果
 
 STM32 USART2 日志包含：
 
 ```text
-uart1=OK txerr=0 ack=11 rxerr=0 ackerr=0 exp=11 got=10 af=0x00
+uart1=OK txerr=0 ack=11 rxerr=0 ackerr=0 exp=11 got=10 af=0x00 retry=0 timeout=0 drop=0 pending=0 net=WM ns=3 nerr=0 wd=0 md=0 nr=3
 ```
 
 | 字段 | 说明 |
@@ -94,6 +130,14 @@ uart1=OK txerr=0 ack=11 rxerr=0 ackerr=0 exp=11 got=10 af=0x00
 | `exp` | 当前刚发送帧的期待 ACK 序号。 |
 | `got` | 最近收到 ACK 所确认的序号。 |
 | `af` | 最近 ACK 的错误标志；`0x00` 表示通过。 |
+| `retry` | 已执行的累计重传次数。 |
+| `timeout` | 等待 ACK 超过 200 ms 的累计次数。 |
+| `drop` | 3 次重传耗尽后放弃的累计帧数。 |
+| `pending` | `1` 表示当前日志打印时本轮缓存帧仍等待 ACK，`0` 表示没有待确认帧。由于日志在发送后、ACK 处理前输出，稳定链路上经常观察到 `1`，应结合下一轮 `ack` 是否递增判断。 |
+| `net` | `W` 表示 Wi-Fi 已连接，`M` 表示 MQTT 已连接，未连接位置显示 `-`。 |
+| `ns` / `nerr` | 通过语义校验的网络状态帧数 / 无效网络状态帧数。 |
+| `wd` / `md` | Wi-Fi / MQTT 从已连接变为断开的累计次数。 |
+| `nr` | 最近网络状态原因，取值见 `NET_STATUS` 原因表。 |
 
 `exp` 与 `got` 在同一行可能相差 1：日志打印时已经登记当前帧，而 `got` 通常是上一帧刚通过校验的 ACK。稳定工作的标准是 `ack` 持续递增、`rxerr=0`、`ackerr=0`、`af=0x00`。
 
@@ -107,7 +151,7 @@ uart1=OK txerr=0 ack=11 rxerr=0 ackerr=0 exp=11 got=10 af=0x00
 
 2026-08-23 已完成实测：AHT20、BH1750 数据均有效，STM32 连续输出 `ack` 递增，`rxerr=0 ackerr=0 af=0x00`；ESP32 同步解析并打印温湿度、照度和有效标志。
 
-## 6. 实际故障定位复盘
+## 7. 实际故障定位复盘
 
 首次联调现象为：ESP32 能收到环境帧，STM32 `rxerr=0`，但出现 `ackerr` 增长和 `af=0x08`，且 `got` 总比 `exp` 小 1。
 
@@ -121,6 +165,8 @@ uart1=OK txerr=0 ack=11 rxerr=0 ackerr=0 exp=11 got=10 af=0x00
 
 修复后链路稳定。以后按以下顺序排查：供电与共地 → TX/RX 交叉和串口参数 → STM32/ESP32 独立日志 → `rxerr` → `ackerr` → `exp/got/af`。源码修改后必须分别 Build 和 Flash；仅复位不会更新 Flash 中的程序。
 
-## 7. 后续网络阶段
+## 8. 网络阶段现状
 
-ESP32 后续应把最近一次有效 `ENV_REPORT` 转成 JSON 上报 MQTT，并保留有效标志和错误计数。Wi-Fi 与 MQTT 断线处理不得阻塞 UART2；网络状态通过 `NET_STATUS` 回传 STM32，供 OLED 和 USART2 日志显示。
+ESP32 已把有效 `ENV_REPORT` 放入容量为 32 条的 FreeRTOS 队列；独立任务等待 MQTT 连接后转成 JSON，并使用 QoS 1 发布。队列满时丢弃最新样本并累计 `queue_overflow_count`，避免无界内存增长。日志每 10 个样本输出连接状态、断线次数、待发数量、溢出、发布接受、发布错误、放弃和 PUBACK 统计。
+
+设备端已实测 Wi-Fi 连接、TLS MQTT 连接、MQTTX 遥测订阅、`NET_STATUS` 回传及短时断网恢复。断网期间 STM32 的 ACK 仍连续递增，说明“ESP32 已接收 UART 帧”与“云端会话状态”被正确解耦。后续仍需验证：Broker 单独不可达、STM32 单独复位后的快照恢复、断开 ESP32→STM32 TX 线导致的 ACK 超时/重传，以及重复帧不重复上云。

@@ -28,6 +28,12 @@ PC13 连接的 Blue Pill 板载 LED 为低电平点亮：写入 `GPIO_PIN_RESET`
 
 当前未启用 FreeRTOS。先保持直接 HAL 轮询和中断版本稳定，再将采样、显示、串口和网络工作拆分为任务。
 
+## 当前端到端验证状态（2026-08-24）
+
+当前 STM32 固件仍是 HAL 轮询架构，但硬件联调已完成：AHT20、BH1750 与 SSD1306 通过 I2C1 正常工作；USART1 与 ESP32 的二进制协议持续 ACK 成功；STM32 可接收 ESP32 的 `NET_STATUS`，在日志中显示 `--`、`W-`、`WM` 三种网络状态。
+
+已完成一次 Wi-Fi 断开与恢复测试：本地采样和 UART ACK 在网络离线期间保持运行，ESP32 重新获得 IP 并恢复 MQTT/TLS 会话后，STM32 状态由 `--` 依次恢复为 `W-`、`WM`。下一阶段才迁移 STM32 至 FreeRTOS；本文件中的 CubeIDE 配置仍是该迁移的稳定基线。
+
 ## 生成和编译
 
 1. 保存 `.ioc` 文件，在 CubeIDE 提示时选择 **Generate Code**。

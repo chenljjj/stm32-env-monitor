@@ -4,7 +4,8 @@
 #include <stdio.h>
 #include <string.h>
 
-#define APP_LOG_BUFFER_SIZE 192U
+/* 完整容纳传感器、UART ACK 和网络状态的单行诊断日志。 */
+#define APP_LOG_BUFFER_SIZE 384U
 
 HAL_StatusTypeDef app_log_write(UART_HandleTypeDef *huart,
                                 const char *message)

@@ -21,6 +21,14 @@ static uint16_t app_protocol_get_u16_le(const uint8_t *buffer)
   return (uint16_t)buffer[0] | ((uint16_t)buffer[1] << 8U);
 }
 
+static uint32_t app_protocol_get_u32_le(const uint8_t *buffer)
+{
+  return (uint32_t)buffer[0] |
+         ((uint32_t)buffer[1] << 8U) |
+         ((uint32_t)buffer[2] << 16U) |
+         ((uint32_t)buffer[3] << 24U);
+}
+
 uint16_t app_protocol_crc16_ccitt(const uint8_t *data, uint16_t length)
 {
   uint16_t crc = 0xFFFFU;
@@ -119,6 +127,35 @@ void app_protocol_pack_env_report(const app_protocol_env_report_t *report,
   app_protocol_put_u32_le(&payload[28], report->bh1750_comm_errors);
   app_protocol_put_u32_le(&payload[32], report->aht20_data_errors);
   app_protocol_put_u32_le(&payload[36], report->bh1750_data_errors);
+}
+
+HAL_StatusTypeDef app_protocol_unpack_net_status(const app_protocol_frame_t *frame,
+                                                  app_protocol_net_status_t *status)
+{
+  const uint8_t *payload;
+
+  if ((frame == NULL) || (status == NULL) ||
+      (frame->type != APP_PROTOCOL_TYPE_NET_STATUS) ||
+      (frame->payload_length != APP_PROTOCOL_NET_STATUS_PAYLOAD_LENGTH))
+  {
+    return HAL_ERROR;
+  }
+
+  payload = frame->payload;
+  if (((payload[0] & (uint8_t)~(APP_PROTOCOL_NET_FLAG_WIFI_CONNECTED |
+                                APP_PROTOCOL_NET_FLAG_MQTT_CONNECTED)) != 0U) ||
+      (payload[1] > APP_PROTOCOL_NET_REASON_MQTT_DOWN) ||
+      (payload[2] != 0U) || (payload[3] != 0U))
+  {
+    return HAL_ERROR;
+  }
+
+  status->flags = payload[0];
+  status->reason = payload[1];
+  status->wifi_disconnect_count = app_protocol_get_u32_le(&payload[4]);
+  status->mqtt_disconnect_count = app_protocol_get_u32_le(&payload[8]);
+
+  return HAL_OK;
 }
 
 void app_protocol_parser_init(app_protocol_parser_t *parser)

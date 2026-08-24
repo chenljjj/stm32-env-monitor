@@ -12,3 +12,14 @@ Release/
 RemoteSystemsTempFiles/
 .vscode/
 *.launch
+
+# ESP32 本地网络与 MQTT 凭据（严禁提交）
+firmware/esp32-env-gateway/main/app_secrets.h
+
+# 本机部署证书、私钥与密钥文件（严禁提交）
+firmware/esp32-env-gateway/main/*.crt
+firmware/esp32-env-gateway/main/*.pem
+firmware/esp32-env-gateway/main/*.cer
+firmware/esp32-env-gateway/main/*.key
+firmware/esp32-env-gateway/main/*.p12
+firmware/esp32-env-gateway/main/*.pfx

@@ -21,6 +21,10 @@ typedef struct
   volatile uint32_t rx_error_count;
   volatile uint32_t ack_count;
   volatile uint32_t ack_error_count;
+  volatile uint32_t net_status_count;
+  volatile uint32_t net_status_error_count;
+  volatile uint32_t wifi_disconnect_count;
+  volatile uint32_t mqtt_disconnect_count;
   volatile uint16_t expected_ack_sequence;
   volatile uint16_t last_ack_sequence;
   volatile uint16_t last_received_ack_sequence;
@@ -29,6 +33,8 @@ typedef struct
   volatile uint8_t last_received_ack_result;
   volatile uint8_t last_ack_error_flags;
   volatile uint8_t awaiting_ack;
+  volatile uint8_t network_flags;
+  volatile uint8_t last_network_reason;
 } app_link_t;
 
 void app_link_init(app_link_t *link, UART_HandleTypeDef *huart);

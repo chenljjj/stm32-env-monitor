@@ -27,7 +27,7 @@
 - 实现 ESP32 Wi-Fi 配网、MQTT 发布、断线检测和有限退避重连
 - 到这一阶段再使用 MQTTX 检查主题和消息内容
 
-当前状态：UART 协议联调已完成。STM32 每秒上报 `ENV_REPORT`，ESP32 使用 UART2（GPIO25/GPIO26）解析后返回 ACK；后续工作从 Wi-Fi 与 MQTT 开始。
+当前状态：UART 协议与设备端网络链路均已硬件实测。STM32 每秒上报 `ENV_REPORT`，ESP32 使用 UART2（GPIO25/GPIO26）解析后返回 ACK；ESP32 已连接 Wi-Fi、以 TLS 8883 连接 EMQX，并由 MQTTX 持续订阅到环境 JSON。已完成 Wi-Fi 断开、自动重连、MQTT 会话恢复与 32 条 FreeRTOS 遥测队列补发验证。LWT 异常断电、错误凭据和长时稳定性仍待单独测试。
 
 ## 阶段 5：可靠性和项目材料
 
@@ -35,19 +35,32 @@
 - 为每类故障定义恢复动作，并在本地显示健康状态
 - 记录通信协议、任务调度、测试用例和实际故障现象
 
+当前状态：ESP32 已统计队列入队、溢出、发布接受、发布错误、放弃和 Broker PUBACK。`NET_STATUS` 已实现并硬件实测：状态变化时立即回传、每 10 个样本发送快照；STM32 可显示 `--`、`W-`、`WM` 以及断线计数。一次短时断网测试中，ESP32 队列峰值为 14、`overflow=0`，恢复后 `queue=0` 且所有已入队样本被接受发布。STM32 的 200 ms ACK 超时、最多 3 次同序号重传与 ESP32 相邻重复帧去重已实现；本轮网络断网测试中未触发 UART 重传。
+
 ## 建议的测量消息
 
 MQTT 阶段使用明确的数据结构：
 
 ```json
 {
-  "device_id": "env-monitor-001",
-  "ts_ms": 0,
-  "temperature_c": 0.0,
-  "humidity_rh": 0.0,
-  "illuminance_lux": 0.0,
-  "status": "ok"
+  "device_id": "stm32-env-gateway-001",
+  "sample": 12,
+  "uptime_ms": 12083,
+  "temperature_c": 23.777,
+  "humidity_rh": 43.892,
+  "illuminance_lux": 48.333,
+  "valid": {
+    "climate": true,
+    "illuminance": true,
+    "display": true
+  },
+  "errors": {
+    "aht20_comm": 0,
+    "bh1750_comm": 0,
+    "aht20_data": 0,
+    "bh1750_data": 0
+  }
 }
 ```
 
-时间戳来源和最终主题命名在 ESP32 网络部分实现时确定。
+当前遥测主题为 `stm32-env-monitor/telemetry`，状态主题为 `stm32-env-monitor/status`。目前使用 STM32 `uptime_ms` 和采样序号，不伪造 Unix 时间；后续可在 ESP32 完成 SNTP 同步后增加绝对时间戳。

@@ -61,6 +61,11 @@ static void app_link_handle_ack(app_link_t *link)
   link->last_ack_error_flags = error_flags;
   if (error_flags != 0U)
   {
+    /* 对端已明确拒绝载荷时，重传相同内容不会改变结果。 */
+    if (error_flags == APP_LINK_ACK_ERROR_RESULT)
+    {
+      link->awaiting_ack = 0U;
+    }
     ++link->ack_error_count;
     return;
   }
@@ -69,6 +74,23 @@ static void app_link_handle_ack(app_link_t *link)
   link->last_ack_result = payload[3];
   link->awaiting_ack = 0U;
   ++link->ack_count;
+}
+
+static void app_link_handle_net_status(app_link_t *link)
+{
+  app_protocol_net_status_t status;
+
+  if (app_protocol_unpack_net_status(&link->frame, &status) != HAL_OK)
+  {
+    ++link->net_status_error_count;
+    return;
+  }
+
+  link->network_flags = status.flags;
+  link->last_network_reason = status.reason;
+  link->wifi_disconnect_count = status.wifi_disconnect_count;
+  link->mqtt_disconnect_count = status.mqtt_disconnect_count;
+  ++link->net_status_count;
 }
 
 void app_link_init(app_link_t *link, UART_HandleTypeDef *huart)
@@ -121,6 +143,10 @@ void app_link_on_uart_rx_complete(app_link_t *link, UART_HandleTypeDef *huart)
     if (link->frame.type == APP_PROTOCOL_TYPE_ACK)
     {
       app_link_handle_ack(link);
+    }
+    else if (link->frame.type == APP_PROTOCOL_TYPE_NET_STATUS)
+    {
+      app_link_handle_net_status(link);
     }
   }
   else if (result != APP_PROTOCOL_PARSE_NONE)

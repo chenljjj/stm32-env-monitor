@@ -30,6 +30,7 @@
 #include "app_monitor.h"
 #include "app_protocol.h"
 #include "app_status.h"
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -60,6 +61,20 @@ static app_display_t app_display;
 static uint16_t app_protocol_tx_sequence;
 static HAL_StatusTypeDef app_protocol_tx_status;
 static uint32_t app_protocol_tx_error_count;
+/* 保存等待 ACK 的完整帧，超时后以原序号重传。 */
+typedef struct
+{
+  uint8_t pending_frame[APP_PROTOCOL_MAX_FRAME_LENGTH];
+  uint16_t pending_frame_length;
+  uint32_t last_tx_tick;
+  uint32_t retry_count;
+  uint32_t timeout_count;
+  uint32_t drop_count;
+  uint8_t retry_attempts;
+  uint8_t pending;
+} app_protocol_reliability_t;
+
+static app_protocol_reliability_t app_protocol_reliability;
 /* USART1 接收解析器与 ACK 统计。 */
 static app_link_t app_link;
 /* USER CODE END PV */
@@ -74,6 +89,8 @@ void SystemClock_Config(void);
 /* USER CODE BEGIN 0 */
 
 #define APP_PROTOCOL_UART_TIMEOUT_MS 20U
+#define APP_PROTOCOL_ACK_TIMEOUT_MS 200U
+#define APP_PROTOCOL_MAX_ACK_RETRIES 3U
 #define APP_PROTOCOL_FLAG_CLIMATE_VALID 0x01U
 #define APP_PROTOCOL_FLAG_ILLUMINANCE_VALID 0x02U
 #define APP_PROTOCOL_FLAG_DISPLAY_READY 0x04U
@@ -81,7 +98,8 @@ void SystemClock_Config(void);
 /* 将最新采样快照打包为 ENV_REPORT，并通过 USART1 发送给 ESP32。 */
 static HAL_StatusTypeDef app_protocol_send_env_report(const app_monitor_t *monitor,
                                                       const app_display_t *display,
-                                                      app_link_t *link)
+                                                      app_link_t *link,
+                                                      app_protocol_reliability_t *reliability)
 {
   app_protocol_env_report_t report = {0};
   uint8_t payload[APP_PROTOCOL_ENV_REPORT_PAYLOAD_LENGTH];
@@ -90,9 +108,16 @@ static HAL_StatusTypeDef app_protocol_send_env_report(const app_monitor_t *monit
   uint16_t sequence;
   HAL_StatusTypeDef status;
 
-  if ((monitor == NULL) || (display == NULL) || (link == NULL))
+  if ((monitor == NULL) || (display == NULL) || (link == NULL) ||
+      (reliability == NULL))
   {
     return HAL_ERROR;
+  }
+
+  /* 上一帧尚未确认时只等待重传流程，不覆盖缓存帧。 */
+  if (link->awaiting_ack != 0U)
+  {
+    return HAL_BUSY;
   }
 
   report.uptime_ms = HAL_GetTick();
@@ -135,6 +160,11 @@ static HAL_StatusTypeDef app_protocol_send_env_report(const app_monitor_t *monit
     return status;
   }
 
+  (void)memcpy(reliability->pending_frame, frame, frame_length);
+  reliability->pending_frame_length = frame_length;
+  reliability->retry_attempts = 0U;
+  reliability->pending = 1U;
+
   /* ESP32 回 ACK 很快，必须在发送前登记本帧序号。 */
   app_link_arm_env_report_ack(link, sequence);
   status = HAL_UART_Transmit(&huart1,
@@ -143,15 +173,70 @@ static HAL_StatusTypeDef app_protocol_send_env_report(const app_monitor_t *monit
                              APP_PROTOCOL_UART_TIMEOUT_MS);
   if (status == HAL_OK)
   {
+    reliability->last_tx_tick = HAL_GetTick();
     ++app_protocol_tx_sequence;
   }
   else
   {
     app_link_cancel_env_report_ack(link);
+    reliability->pending = 0U;
+    reliability->pending_frame_length = 0U;
     ++app_protocol_tx_error_count;
   }
 
   return status;
+}
+
+/* 非阻塞检查 ACK 超时；每帧最多额外发送三次。 */
+static void app_protocol_retry_pending_report(app_link_t *link,
+                                              app_protocol_reliability_t *reliability)
+{
+  HAL_StatusTypeDef status;
+  uint32_t now;
+
+  if ((link == NULL) || (reliability == NULL) || (reliability->pending == 0U))
+  {
+    return;
+  }
+
+  /* ACK 中断已确认当前帧，释放本地缓存。 */
+  if (link->awaiting_ack == 0U)
+  {
+    reliability->pending = 0U;
+    reliability->pending_frame_length = 0U;
+    return;
+  }
+
+  now = HAL_GetTick();
+  if ((uint32_t)(now - reliability->last_tx_tick) < APP_PROTOCOL_ACK_TIMEOUT_MS)
+  {
+    return;
+  }
+
+  ++reliability->timeout_count;
+  if (reliability->retry_attempts >= APP_PROTOCOL_MAX_ACK_RETRIES)
+  {
+    /* 重试耗尽后放弃旧帧，下一采样周期生成新帧继续工作。 */
+    app_link_cancel_env_report_ack(link);
+    reliability->pending = 0U;
+    reliability->pending_frame_length = 0U;
+    ++reliability->drop_count;
+    return;
+  }
+
+  ++reliability->retry_attempts;
+  ++reliability->retry_count;
+  reliability->last_tx_tick = now;
+  status = HAL_UART_Transmit(link->huart,
+                             reliability->pending_frame,
+                             reliability->pending_frame_length,
+                             APP_PROTOCOL_UART_TIMEOUT_MS);
+  app_protocol_tx_status = status;
+  if (status != HAL_OK)
+  {
+    app_protocol_tx_status = status;
+    ++app_protocol_tx_error_count;
+  }
 }
 
 /* USER CODE END 0 */
@@ -211,6 +296,7 @@ int main(void)
     /* USER CODE BEGIN 3 */
     /* 非阻塞地更新 LED 心跳与故障指示。 */
     app_status_update(&app_status, LED_PC13_GPIO_Port, LED_PC13_Pin);
+    app_protocol_retry_pending_report(&app_link, &app_protocol_reliability);
 
     sample_updated = app_monitor_update(&app_monitor, &hi2c1);
     if (sample_updated != 0U)
@@ -219,7 +305,8 @@ int main(void)
 
       app_protocol_tx_status = app_protocol_send_env_report(&app_monitor,
                                                              &app_display,
-                                                             &app_link);
+                                                             &app_link,
+                                                             &app_protocol_reliability);
 
       if (temperature_fraction < 0)
       {
@@ -230,7 +317,9 @@ int main(void)
       (void)app_log_printf(&huart2,
                            "sample=%lu aht=%s valid=%u t=%ld.%03ldC h=%lu.%03lu%% "
                            "bh=%s valid=%u l=%lu.%03lulx comm=%lu/%lu data=%lu/%lu "
-                           "uart1=%s txerr=%lu ack=%lu rxerr=%lu ackerr=%lu exp=%u got=%u af=0x%02X\r\n",
+                           "uart1=%s txerr=%lu ack=%lu rxerr=%lu ackerr=%lu exp=%u got=%u af=0x%02X "
+                           "retry=%lu timeout=%lu drop=%lu pending=%u "
+                           "net=%c%c ns=%lu nerr=%lu wd=%lu md=%lu nr=%u\r\n",
                            (unsigned long)app_monitor.sample_sequence,
                            app_monitor_status_name(app_monitor.aht20_status),
                            (unsigned int)app_monitor.climate_valid,
@@ -253,7 +342,18 @@ int main(void)
                            (unsigned long)app_link.ack_error_count,
                            (unsigned int)app_link.expected_ack_sequence,
                            (unsigned int)app_link.last_received_ack_sequence,
-                           (unsigned int)app_link.last_ack_error_flags);
+                           (unsigned int)app_link.last_ack_error_flags,
+                           (unsigned long)app_protocol_reliability.retry_count,
+                           (unsigned long)app_protocol_reliability.timeout_count,
+                           (unsigned long)app_protocol_reliability.drop_count,
+                           (unsigned int)app_protocol_reliability.pending,
+                           (app_link.network_flags & APP_PROTOCOL_NET_FLAG_WIFI_CONNECTED) != 0U ? 'W' : '-',
+                           (app_link.network_flags & APP_PROTOCOL_NET_FLAG_MQTT_CONNECTED) != 0U ? 'M' : '-',
+                           (unsigned long)app_link.net_status_count,
+                           (unsigned long)app_link.net_status_error_count,
+                           (unsigned long)app_link.wifi_disconnect_count,
+                           (unsigned long)app_link.mqtt_disconnect_count,
+                           (unsigned int)app_link.last_network_reason);
     }
 
     app_display_update(&app_display,

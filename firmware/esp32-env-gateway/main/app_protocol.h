@@ -14,6 +14,10 @@
 #define APP_PROTOCOL_MAX_FRAME_LENGTH           (2U + APP_PROTOCOL_BODY_HEADER_LENGTH + \
                                                  APP_PROTOCOL_MAX_PAYLOAD_LENGTH + APP_PROTOCOL_CRC_LENGTH)
 #define APP_PROTOCOL_ENV_REPORT_PAYLOAD_LENGTH  40U
+#define APP_PROTOCOL_NET_STATUS_PAYLOAD_LENGTH  12U
+
+#define APP_PROTOCOL_NET_FLAG_WIFI_CONNECTED  0x01U
+#define APP_PROTOCOL_NET_FLAG_MQTT_CONNECTED  0x02U
 
 typedef enum
 {
@@ -23,6 +27,23 @@ typedef enum
     APP_PROTOCOL_TYPE_NET_STATUS = 0x81U,
     APP_PROTOCOL_TYPE_PONG       = 0x82U
 } app_protocol_type_t;
+
+/* ACK 载荷最后一个字节的处理结果。 */
+typedef enum
+{
+    APP_PROTOCOL_ACK_RESULT_OK               = 0x00U,
+    APP_PROTOCOL_ACK_RESULT_UNSUPPORTED_TYPE = 0x01U,
+    APP_PROTOCOL_ACK_RESULT_INVALID_PAYLOAD  = 0x02U
+} app_protocol_ack_result_t;
+
+typedef enum
+{
+    APP_PROTOCOL_NET_REASON_STARTUP   = 0U,
+    APP_PROTOCOL_NET_REASON_WIFI_UP   = 1U,
+    APP_PROTOCOL_NET_REASON_WIFI_DOWN = 2U,
+    APP_PROTOCOL_NET_REASON_MQTT_UP   = 3U,
+    APP_PROTOCOL_NET_REASON_MQTT_DOWN = 4U
+} app_protocol_net_reason_t;
 
 typedef struct
 {
@@ -47,6 +68,14 @@ typedef struct
     uint32_t aht20_data_errors;
     uint32_t bh1750_data_errors;
 } app_protocol_env_report_t;
+
+typedef struct
+{
+    uint8_t flags;
+    uint8_t reason;
+    uint32_t wifi_disconnect_count;
+    uint32_t mqtt_disconnect_count;
+} app_protocol_net_status_t;
 
 typedef enum
 {
@@ -92,5 +121,8 @@ app_protocol_parse_result_t app_protocol_parser_input(app_protocol_parser_t *par
 
 bool app_protocol_unpack_env_report(const app_protocol_frame_t *frame,
                                     app_protocol_env_report_t *report);
+
+bool app_protocol_pack_net_status(const app_protocol_net_status_t *status,
+                                  uint8_t payload[APP_PROTOCOL_NET_STATUS_PAYLOAD_LENGTH]);
 
 #endif /* APP_PROTOCOL_H */
