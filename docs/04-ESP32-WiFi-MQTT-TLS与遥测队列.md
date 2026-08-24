@@ -1,6 +1,10 @@
 # ESP32 Wi-Fi、MQTT/TLS 与遥测队列
 
+Wi-Fi、MQTT、TLS 等技术缩写保持行业惯用写法。
+
 本文说明 ESP32 网关如何把 STM32 的 UART 环境帧转换为 MQTT 消息，以及当前已经验证和仍待验证的边界。
+
+截至当前版本，UART 采集端已迁移为 STM32 FreeRTOS 多任务架构，ESP32 的 Wi-Fi/MQTT 网关行为与协议载荷保持兼容；采集、OLED、ACK 和 MQTT 遥测已再次完成实板联调。
 
 ## 1. 数据路径
 

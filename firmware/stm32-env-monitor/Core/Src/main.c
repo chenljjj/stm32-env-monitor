@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "cmsis_os.h"
 #include "i2c.h"
 #include "usart.h"
 #include "gpio.h"
@@ -29,6 +30,7 @@
 #include "app_display.h"
 #include "app_monitor.h"
 #include "app_protocol.h"
+#include "app_runtime.h"
 #include "app_status.h"
 #include <string.h>
 /* USER CODE END Includes */
@@ -77,10 +79,23 @@ typedef struct
 static app_protocol_reliability_t app_protocol_reliability;
 /* USART1 接收解析器与 ACK 统计。 */
 static app_link_t app_link;
+/* 采样任务向显示/链路任务复制的完整快照。 */
+typedef struct
+{
+  app_monitor_t monitor;
+  uint8_t display_ready;
+} app_runtime_snapshot_t;
+
+static osMutexId_t app_i2c_mutex;
+static osMessageQueueId_t app_display_queue;
+static osMessageQueueId_t app_link_queue;
+static uint32_t app_display_queue_drop_count;
+static uint32_t app_link_queue_drop_count;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
+void MX_FREERTOS_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -94,10 +109,15 @@ void SystemClock_Config(void);
 #define APP_PROTOCOL_FLAG_CLIMATE_VALID 0x01U
 #define APP_PROTOCOL_FLAG_ILLUMINANCE_VALID 0x02U
 #define APP_PROTOCOL_FLAG_DISPLAY_READY 0x04U
+#define APP_RTOS_SENSOR_PERIOD_TICKS 1000U
+#define APP_RTOS_DISPLAY_WAIT_TICKS 250U
+#define APP_RTOS_LINK_WAIT_TICKS 20U
+#define APP_RTOS_HEALTH_PERIOD_TICKS 100U
+#define APP_RTOS_SNAPSHOT_QUEUE_LENGTH 3U
 
 /* 将最新采样快照打包为 ENV_REPORT，并通过 USART1 发送给 ESP32。 */
 static HAL_StatusTypeDef app_protocol_send_env_report(const app_monitor_t *monitor,
-                                                      const app_display_t *display,
+                                                      uint8_t display_ready,
                                                       app_link_t *link,
                                                       app_protocol_reliability_t *reliability)
 {
@@ -108,8 +128,7 @@ static HAL_StatusTypeDef app_protocol_send_env_report(const app_monitor_t *monit
   uint16_t sequence;
   HAL_StatusTypeDef status;
 
-  if ((monitor == NULL) || (display == NULL) || (link == NULL) ||
-      (reliability == NULL))
+  if ((monitor == NULL) || (link == NULL) || (reliability == NULL))
   {
     return HAL_ERROR;
   }
@@ -140,7 +159,7 @@ static HAL_StatusTypeDef app_protocol_send_env_report(const app_monitor_t *monit
   {
     report.valid_flags |= APP_PROTOCOL_FLAG_ILLUMINANCE_VALID;
   }
-  if (display->initialized != 0U)
+  if (display_ready != 0U)
   {
     report.valid_flags |= APP_PROTOCOL_FLAG_DISPLAY_READY;
   }
@@ -239,6 +258,225 @@ static void app_protocol_retry_pending_report(app_link_t *link,
   }
 }
 
+/* USART2 保持详细链路诊断，方便比较 RTOS 迁移前后的行为。 */
+static void app_runtime_log_snapshot(const app_runtime_snapshot_t *snapshot)
+{
+  const app_monitor_t *monitor;
+  int32_t temperature_fraction;
+
+  if (snapshot == NULL)
+  {
+    return;
+  }
+
+  monitor = &snapshot->monitor;
+  temperature_fraction = monitor->climate.temperature_milli_c % 1000;
+  if (temperature_fraction < 0)
+  {
+    temperature_fraction = -temperature_fraction;
+  }
+
+  (void)app_log_printf(&huart2,
+                       "sample=%lu aht=%s valid=%u t=%ld.%03ldC h=%lu.%03lu%% "
+                       "bh=%s valid=%u l=%lu.%03lulx comm=%lu/%lu data=%lu/%lu "
+                       "uart1=%s txerr=%lu ack=%lu rxerr=%lu ackerr=%lu exp=%u got=%u af=0x%02X "
+                       "retry=%lu timeout=%lu drop=%lu pending=%u qdrop=%lu/%lu "
+                       "net=%c%c ns=%lu nerr=%lu wd=%lu md=%lu nr=%u\r\n",
+                       (unsigned long)monitor->sample_sequence,
+                       app_monitor_status_name(monitor->aht20_status),
+                       (unsigned int)monitor->climate_valid,
+                       (long)(monitor->climate.temperature_milli_c / 1000),
+                       (long)temperature_fraction,
+                       (unsigned long)(monitor->climate.humidity_milli_rh / 1000U),
+                       (unsigned long)(monitor->climate.humidity_milli_rh % 1000U),
+                       app_monitor_status_name(monitor->bh1750_status),
+                       (unsigned int)monitor->illuminance_valid,
+                       (unsigned long)(monitor->illuminance_milli_lux / 1000U),
+                       (unsigned long)(monitor->illuminance_milli_lux % 1000U),
+                       (unsigned long)monitor->aht20_error_count,
+                       (unsigned long)monitor->bh1750_error_count,
+                       (unsigned long)monitor->aht20_data_error_count,
+                       (unsigned long)monitor->bh1750_data_error_count,
+                       app_monitor_status_name(app_protocol_tx_status),
+                       (unsigned long)app_protocol_tx_error_count,
+                       (unsigned long)app_link.ack_count,
+                       (unsigned long)app_link.rx_error_count,
+                       (unsigned long)app_link.ack_error_count,
+                       (unsigned int)app_link.expected_ack_sequence,
+                       (unsigned int)app_link.last_received_ack_sequence,
+                       (unsigned int)app_link.last_ack_error_flags,
+                       (unsigned long)app_protocol_reliability.retry_count,
+                       (unsigned long)app_protocol_reliability.timeout_count,
+                       (unsigned long)app_protocol_reliability.drop_count,
+                       (unsigned int)app_protocol_reliability.pending,
+                       (unsigned long)app_display_queue_drop_count,
+                       (unsigned long)app_link_queue_drop_count,
+                       (app_link.network_flags & APP_PROTOCOL_NET_FLAG_WIFI_CONNECTED) != 0U ? 'W' : '-',
+                       (app_link.network_flags & APP_PROTOCOL_NET_FLAG_MQTT_CONNECTED) != 0U ? 'M' : '-',
+                       (unsigned long)app_link.net_status_count,
+                       (unsigned long)app_link.net_status_error_count,
+                       (unsigned long)app_link.wifi_disconnect_count,
+                       (unsigned long)app_link.mqtt_disconnect_count,
+                       (unsigned int)app_link.last_network_reason);
+}
+
+static void app_runtime_sensor_task(void *argument)
+{
+  app_runtime_snapshot_t snapshot;
+  uint32_t next_tick = osKernelGetTickCount();
+
+  (void)argument;
+  for (;;)
+  {
+    if (osMutexAcquire(app_i2c_mutex, osWaitForever) == osOK)
+    {
+      if (app_monitor_update(&app_monitor, &hi2c1) != 0U)
+      {
+        snapshot.monitor = app_monitor;
+        /* OLED 由显示任务独占，此标志允许链路任务使用最近已知状态。 */
+        snapshot.display_ready = app_display.initialized;
+
+        if (osMessageQueuePut(app_display_queue, &snapshot, 0U, 0U) != osOK)
+        {
+          ++app_display_queue_drop_count;
+        }
+        if (osMessageQueuePut(app_link_queue, &snapshot, 0U, 0U) != osOK)
+        {
+          ++app_link_queue_drop_count;
+        }
+      }
+      (void)osMutexRelease(app_i2c_mutex);
+    }
+
+    next_tick += APP_RTOS_SENSOR_PERIOD_TICKS;
+    (void)osDelayUntil(next_tick);
+  }
+}
+
+static void app_runtime_display_task(void *argument)
+{
+  app_runtime_snapshot_t snapshot = {0};
+  uint8_t has_snapshot = 0U;
+
+  (void)argument;
+  for (;;)
+  {
+    uint8_t data_changed = 0U;
+
+    if (osMessageQueueGet(app_display_queue,
+                          &snapshot,
+                          NULL,
+                          APP_RTOS_DISPLAY_WAIT_TICKS) == osOK)
+    {
+      has_snapshot = 1U;
+      data_changed = 1U;
+    }
+
+    if ((has_snapshot != 0U) &&
+        (osMutexAcquire(app_i2c_mutex, osWaitForever) == osOK))
+    {
+      app_display_update(&app_display, &hi2c1, &snapshot.monitor, data_changed);
+      (void)osMutexRelease(app_i2c_mutex);
+    }
+  }
+}
+
+static void app_runtime_link_task(void *argument)
+{
+  app_runtime_snapshot_t snapshot;
+
+  (void)argument;
+  for (;;)
+  {
+    app_protocol_retry_pending_report(&app_link, &app_protocol_reliability);
+
+    if (osMessageQueueGet(app_link_queue,
+                          &snapshot,
+                          NULL,
+                          APP_RTOS_LINK_WAIT_TICKS) == osOK)
+    {
+      app_protocol_tx_status = app_protocol_send_env_report(&snapshot.monitor,
+                                                             snapshot.display_ready,
+                                                             &app_link,
+                                                             &app_protocol_reliability);
+      app_runtime_log_snapshot(&snapshot);
+    }
+  }
+}
+
+static void app_runtime_health_task(void *argument)
+{
+  (void)argument;
+  for (;;)
+  {
+    app_status_update(&app_status, LED_PC13_GPIO_Port, LED_PC13_Pin);
+    (void)osDelay(APP_RTOS_HEALTH_PERIOD_TICKS);
+  }
+}
+
+void app_runtime_init(void)
+{
+  /* 日志失败仅改变 LED 状态，不阻止后续任务创建。 */
+  app_status_init(&app_status,
+                  app_log_write(&huart2, "stm32-env-monitor boot\r\n"));
+  app_monitor_init(&app_monitor);
+  app_display_init(&app_display);
+  app_protocol_tx_status = HAL_BUSY;
+
+  /* ACK 字节只做协议解析，不调用 RTOS API，可保持高于内核的优先级。 */
+  app_link_init(&app_link, &huart1);
+  HAL_NVIC_SetPriority(USART1_IRQn, 1U, 0U);
+  HAL_NVIC_EnableIRQ(USART1_IRQn);
+}
+
+void app_runtime_start(void)
+{
+  static const osThreadAttr_t sensor_attributes = {
+    .name = "SensorTask",
+    .stack_size = 384U * 4U,
+    .priority = (osPriority_t)osPriorityAboveNormal,
+  };
+  static const osThreadAttr_t display_attributes = {
+    .name = "DisplayTask",
+    .stack_size = 384U * 4U,
+    .priority = (osPriority_t)osPriorityBelowNormal,
+  };
+  static const osThreadAttr_t link_attributes = {
+    .name = "LinkTask",
+    .stack_size = 512U * 4U,
+    .priority = (osPriority_t)osPriorityAboveNormal,
+  };
+  static const osThreadAttr_t health_attributes = {
+    .name = "HealthTask",
+    .stack_size = 192U * 4U,
+    .priority = (osPriority_t)osPriorityLow,
+  };
+
+  app_i2c_mutex = osMutexNew(NULL);
+  app_display_queue = osMessageQueueNew(APP_RTOS_SNAPSHOT_QUEUE_LENGTH,
+                                        sizeof(app_runtime_snapshot_t),
+                                        NULL);
+  app_link_queue = osMessageQueueNew(APP_RTOS_SNAPSHOT_QUEUE_LENGTH,
+                                     sizeof(app_runtime_snapshot_t),
+                                     NULL);
+
+  if ((app_i2c_mutex == NULL) || (app_display_queue == NULL) ||
+      (app_link_queue == NULL) ||
+      (osThreadNew(app_runtime_sensor_task, NULL, &sensor_attributes) == NULL) ||
+      (osThreadNew(app_runtime_display_task, NULL, &display_attributes) == NULL) ||
+      (osThreadNew(app_runtime_link_task, NULL, &link_attributes) == NULL) ||
+      (osThreadNew(app_runtime_health_task, NULL, &health_attributes) == NULL))
+  {
+    /* 堆不足时保留 defaultTask，使 LED 常亮并避免继续运行半初始化系统。 */
+    app_status.startup_status = HAL_ERROR;
+    for (;;)
+    {
+      app_status_update(&app_status, LED_PC13_GPIO_Port, LED_PC13_Pin);
+      (void)osDelay(APP_RTOS_HEALTH_PERIOD_TICKS);
+    }
+  }
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -249,8 +487,6 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-  uint8_t sample_updated;
-
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -275,17 +511,17 @@ int main(void)
   MX_I2C1_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-  /* 日志失败仅改变状态指示，不阻止主程序继续运行。 */
-  app_status_init(&app_status,
-                  app_log_write(&huart2, "stm32-env-monitor boot\r\n"));
-  app_monitor_init(&app_monitor);
-  app_display_init(&app_display);
-  app_protocol_tx_status = HAL_BUSY;
-  /* USART1 的 ACK 接收使用中断，优先级高于 SysTick。 */
-  HAL_NVIC_SetPriority(USART1_IRQn, 1U, 0U);
-  HAL_NVIC_EnableIRQ(USART1_IRQn);
-  app_link_init(&app_link, &huart1);
+  app_runtime_init();
   /* USER CODE END 2 */
+
+  /* Init scheduler */
+  osKernelInitialize();  /* Call init function for freertos objects (in cmsis_os2.c) */
+  MX_FREERTOS_Init();
+
+  /* Start scheduler */
+  osKernelStart();
+
+  /* We should never get here as control is now taken by the scheduler */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
@@ -294,72 +530,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    /* 非阻塞地更新 LED 心跳与故障指示。 */
-    app_status_update(&app_status, LED_PC13_GPIO_Port, LED_PC13_Pin);
-    app_protocol_retry_pending_report(&app_link, &app_protocol_reliability);
-
-    sample_updated = app_monitor_update(&app_monitor, &hi2c1);
-    if (sample_updated != 0U)
-    {
-      int32_t temperature_fraction = app_monitor.climate.temperature_milli_c % 1000;
-
-      app_protocol_tx_status = app_protocol_send_env_report(&app_monitor,
-                                                             &app_display,
-                                                             &app_link,
-                                                             &app_protocol_reliability);
-
-      if (temperature_fraction < 0)
-      {
-        temperature_fraction = -temperature_fraction;
-      }
-
-      /* 同时输出有效标志和错误次数，便于未接硬件时定位问题。 */
-      (void)app_log_printf(&huart2,
-                           "sample=%lu aht=%s valid=%u t=%ld.%03ldC h=%lu.%03lu%% "
-                           "bh=%s valid=%u l=%lu.%03lulx comm=%lu/%lu data=%lu/%lu "
-                           "uart1=%s txerr=%lu ack=%lu rxerr=%lu ackerr=%lu exp=%u got=%u af=0x%02X "
-                           "retry=%lu timeout=%lu drop=%lu pending=%u "
-                           "net=%c%c ns=%lu nerr=%lu wd=%lu md=%lu nr=%u\r\n",
-                           (unsigned long)app_monitor.sample_sequence,
-                           app_monitor_status_name(app_monitor.aht20_status),
-                           (unsigned int)app_monitor.climate_valid,
-                           (long)(app_monitor.climate.temperature_milli_c / 1000),
-                           (long)temperature_fraction,
-                           (unsigned long)(app_monitor.climate.humidity_milli_rh / 1000U),
-                           (unsigned long)(app_monitor.climate.humidity_milli_rh % 1000U),
-                           app_monitor_status_name(app_monitor.bh1750_status),
-                           (unsigned int)app_monitor.illuminance_valid,
-                           (unsigned long)(app_monitor.illuminance_milli_lux / 1000U),
-                           (unsigned long)(app_monitor.illuminance_milli_lux % 1000U),
-                           (unsigned long)app_monitor.aht20_error_count,
-                           (unsigned long)app_monitor.bh1750_error_count,
-                           (unsigned long)app_monitor.aht20_data_error_count,
-                           (unsigned long)app_monitor.bh1750_data_error_count,
-                           app_monitor_status_name(app_protocol_tx_status),
-                           (unsigned long)app_protocol_tx_error_count,
-                           (unsigned long)app_link.ack_count,
-                           (unsigned long)app_link.rx_error_count,
-                           (unsigned long)app_link.ack_error_count,
-                           (unsigned int)app_link.expected_ack_sequence,
-                           (unsigned int)app_link.last_received_ack_sequence,
-                           (unsigned int)app_link.last_ack_error_flags,
-                           (unsigned long)app_protocol_reliability.retry_count,
-                           (unsigned long)app_protocol_reliability.timeout_count,
-                           (unsigned long)app_protocol_reliability.drop_count,
-                           (unsigned int)app_protocol_reliability.pending,
-                           (app_link.network_flags & APP_PROTOCOL_NET_FLAG_WIFI_CONNECTED) != 0U ? 'W' : '-',
-                           (app_link.network_flags & APP_PROTOCOL_NET_FLAG_MQTT_CONNECTED) != 0U ? 'M' : '-',
-                           (unsigned long)app_link.net_status_count,
-                           (unsigned long)app_link.net_status_error_count,
-                           (unsigned long)app_link.wifi_disconnect_count,
-                           (unsigned long)app_link.mqtt_disconnect_count,
-                           (unsigned int)app_link.last_network_reason);
-    }
-
-    app_display_update(&app_display,
-                       &hi2c1,
-                       &app_monitor,
-                       sample_updated);
+    /* 调度器启动后不应执行到此处。 */
+    __WFI();
   }
   /* USER CODE END 3 */
 }

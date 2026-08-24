@@ -136,7 +136,7 @@ MQTT 主题：
 - `ACK`（`0x80`）载荷固定 4 字节：被确认序号、被确认消息类型和处理结果。结果 `0x00` 表示载荷已成功解包，`0x01` 表示类型不支持，`0x02` 表示载荷无效；ACK 不代表 MQTT 已发布成功。
 - `NET_STATUS`（`0x81`）载荷固定 12 字节：Wi-Fi/MQTT 连接标志、变化原因、Wi-Fi 断线次数和 MQTT 断线次数。状态变化时立即发送，并每 10 个环境样本补发一次快照。
 
-完整字段定义、ACK 状态机、诊断字段和实际故障定位过程见 [UART 协议与联调记录](docs/03-stm32-esp32-uart-protocol-debug.md)。
+完整字段定义、ACK 状态机、诊断字段和实际故障定位过程见 [UART 协议与联调记录](docs/03-STM32与ESP32串口协议与调试.md)。
 
 ## 快速复现
 
@@ -187,10 +187,11 @@ stm32-env-monitor/
 │   ├── stm32-env-monitor/       # STM32CubeIDE / CubeMX 工程
 │   └── esp32-env-gateway/       # ESP-IDF 网关工程
 ├── docs/
-│   ├── 01-cubeide-bringup.md
-│   ├── 02-roadmap.md
-│   ├── 03-stm32-esp32-uart-protocol-debug.md
-│   └── 04-esp32-wifi-mqtt-tls.md
+│   ├── 01-CubeIDE工程配置与基线验证.md
+│   ├── 02-项目实现路线图.md
+│   ├── 03-STM32与ESP32串口协议与调试.md
+│   ├── 04-ESP32-WiFi-MQTT-TLS与遥测队列.md
+│   └── 05-STM32-FreeRTOS运行时设计.md
 └── README.md
 ```
 
@@ -203,7 +204,8 @@ stm32-env-monitor/
 
 ## 相关文档
 
-- [CubeIDE 工程配置与基线验证](docs/01-cubeide-bringup.md)
-- [实现路线图](docs/02-roadmap.md)
-- [STM32—ESP32 UART 协议与联调记录](docs/03-stm32-esp32-uart-protocol-debug.md)
-- [ESP32 Wi-Fi、MQTT/TLS 与遥测队列](docs/04-esp32-wifi-mqtt-tls.md)
+- [CubeIDE 工程配置与基线验证](docs/01-CubeIDE工程配置与基线验证.md)
+- [实现路线图](docs/02-项目实现路线图.md)
+- [STM32—ESP32 UART 协议与联调记录](docs/03-STM32与ESP32串口协议与调试.md)
+- [ESP32 Wi-Fi、MQTT/TLS 与遥测队列](docs/04-ESP32-WiFi-MQTT-TLS与遥测队列.md)
+- [STM32 FreeRTOS 运行时设计](docs/05-STM32-FreeRTOS运行时设计.md)
