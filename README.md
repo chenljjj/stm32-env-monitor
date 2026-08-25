@@ -24,6 +24,10 @@ SSD1306─┘                  │                                      │
 | 联网网关 | ESP-IDF、Wi-Fi STA 事件重连、MQTT 3.1.1 over TLS、QoS 1、在线 retained 状态、LWT 与有界离线队列。 |
 | 可观测性 | STM32 USART2 与 ESP-IDF Monitor 输出分层日志；统计 ACK、重试、超时、队列、堆与任务栈高水位。 |
 
+## 配套上位机
+
+日志可视化与 MQTT JSON 消息解析上位机位于独立仓库：[env-monitor-studio](https://github.com/chenljjj/env-monitor-studio)。该工具用于连接设备调试日志、查看 MQTT 遥测和辅助端到端联调。
+
 ## 已验证结果
 
 ### 本地采集与双板通信
