@@ -26,7 +26,10 @@ SSD1306─┘                  │                                      │
 
 ## 配套上位机
 
-日志可视化与 MQTT JSON 消息解析上位机位于独立仓库：[env-monitor-studio](https://github.com/chenljjj/env-monitor-studio)。该工具用于连接设备调试日志、查看 MQTT 遥测和辅助端到端联调。
+本项目配套两个独立上位机仓库：
+
+- [env-monitor-client（产品端）](https://github.com/chenljjj/env-monitor-client)：面向日常使用，展示设备环境数据与联网状态。
+- [env-monitor-studio（调试端）](https://github.com/chenljjj/env-monitor-studio)：面向开发调试，汇集 STM32、ESP32 与 MQTT 日志，辅助排查通信、网络和云端链路问题。
 
 ## 已验证结果
 
@@ -83,6 +86,12 @@ CSV 的 `time` 是日志被上位机接收/记录的时间，少量相邻行间�
 | AHT20 | I2C，7 位地址 `0x38`。 |
 | BH1750 | I2C，ADDR 接地时 7 位地址 `0x23`。 |
 | SSD1306 | I2C，128×64，常用 7 位地址 `0x3C`。 |
+
+### 实物接线
+
+下图为已完成传感器采集、OLED 显示、STM32—ESP32 串口通信与联网遥测验证时的面包板连接实物。
+
+![硬件接线实物图](docs/images/硬件接线实物图.jpg)
 
 ### I2C1
 
